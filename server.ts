@@ -8,7 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 import Groq from 'groq-sdk';
 import { OpenRouter } from '@openrouter/sdk';
 import { OpenAI } from 'openai';
-import { ChatMessage, ChatContext, Persona, Poll, EvidenceCard, ResearchSession, ResearchReport, PixelTask, GeneratedImageAttachment, ImageQuotaInfo, BotMemoryBank, BotMemoryShard } from './src/types';
+import { ChatMessage, ChatContext, Persona, Poll, EvidenceCard, ResearchSession, ResearchReport, PixelTask, GeneratedImageAttachment, ImageQuotaInfo, BotMemoryBank, BotMemoryShard, CharacterImportAnalysis, ThoughtfulnessLevel } from './src/types';
 import {
   fetch_web_results,
   fetch_full_page,
@@ -3334,6 +3334,431 @@ app.get('/api/personas', (req, res) => {
   res.json({ personas: store.personas });
 });
 
+// Intelligent JSON Character Card Analyzer & Lore-to-Memory Distiller (Tavern V1/V2/V3, Chub, Character.AI, Custom JSON)
+function replaceTavernMacros(text: string, charName: string, userLabel = 'User'): string {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/\{\{\s*char\s*\}\}/gi, charName)
+    .replace(/<BOT>/gi, charName)
+    .replace(/\{\{\s*user\s*\}\}/gi, userLabel)
+    .replace(/<USER>/gi, userLabel)
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+function extractDialogueAnchorsFromExamples(
+  mesExample: string,
+  firstMes: string,
+  charName: string
+): string[] {
+  const anchors: string[] = [];
+  const escapedName = charName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const combined = `${mesExample || ''}\n${firstMes || ''}`;
+
+  // 1. Extract spoken quotes "..." or character lines
+  const lines = combined
+    .split(/\n|<START>/i)
+    .map((l) => l.trim())
+    .filter((l) => l.length >= 12 && !/^(?:\{\{user\}\}|user|you|<user>)\s*:/i.test(l));
+
+  for (const rawLine of lines) {
+    let cleaned = rawLine
+      .replace(new RegExp(`^(?:\\{\\{char\\}\\}|${escapedName}|<bot>)\\s*:\\s*`, 'i'), '')
+      .trim();
+    cleaned = replaceTavernMacros(cleaned, charName, 'you');
+    if (!cleaned || cleaned.length < 12) continue;
+
+    // If line is very long, take the first 1-2 sentences or first 160 chars
+    if (cleaned.length > 165) {
+      const sentenceMatch = cleaned.match(/^([^.!?]+[.!?]+(?:\s+[^.!?]+[.!?]+)?)/);
+      cleaned = sentenceMatch ? sentenceMatch[1].trim() : cleaned.slice(0, 160).trim();
+    }
+    if (
+      cleaned.length >= 12 &&
+      cleaned.length <= 180 &&
+      !anchors.some((a) => a.toLowerCase() === cleaned.toLowerCase())
+    ) {
+      anchors.push(cleaned);
+    }
+    if (anchors.length >= 5) break;
+  }
+
+  // Fallback: extract quoted dialogue if any
+  if (anchors.length < 2 && combined.length > 0) {
+    const quoteMatches = combined.match(/"([^"\n]{15,150})"/g);
+    if (quoteMatches) {
+      for (const q of quoteMatches) {
+        const inner = replaceTavernMacros(q.slice(1, -1).trim(), charName, 'you');
+        if (inner && !anchors.includes(inner)) {
+          anchors.push(inner);
+          if (anchors.length >= 4) break;
+        }
+      }
+    }
+  }
+
+  return anchors;
+}
+
+function extractLoreShardsFromCard(
+  rawDesc: string,
+  rawPersonality: string,
+  rawScenario: string,
+  characterBook: any,
+  charName: string
+): Array<{ s: string; k: string[]; w: number }> {
+  const shards: Array<{ s: string; k: string[]; w: number }> = [];
+
+  const pushUniqueShard = (summary: string, customTags: string[] = [], weight = 4) => {
+    const clean = replaceTavernMacros(summary, charName, 'User')
+      .replace(/\s+/g, ' ')
+      .replace(/^[-*•]+\s*/, '')
+      .trim()
+      .slice(0, 120);
+    if (!clean || clean.length < 15) return;
+    if (shards.some((existing) => existing.s.toLowerCase() === clean.toLowerCase())) return;
+    const tags = Array.from(
+      new Set([
+        ...customTags.map((t) => String(t).toLowerCase().trim()).filter((t) => t.length >= 2),
+        ...tokenizeForMemory(clean).slice(0, 5),
+      ])
+    ).slice(0, 6);
+    shards.push({
+      s: clean,
+      k: tags.length > 0 ? tags : ['lore', charName.toLowerCase()],
+      w: Math.max(1, Math.min(5, weight)),
+    });
+  };
+
+  // 1. Extract from Tavern V2/V3 character_book (Lorebook / World Info entries)
+  const bookEntries = Array.isArray(characterBook?.entries)
+    ? characterBook.entries
+    : characterBook?.entries && typeof characterBook.entries === 'object'
+    ? Object.values(characterBook.entries)
+    : [];
+
+  for (const entry of bookEntries) {
+    if (!entry || entry.enabled === false) continue;
+    const content = String(entry.content || entry.entry || '').trim();
+    if (!content) continue;
+    const keys: string[] = Array.isArray(entry.keys)
+      ? entry.keys
+      : typeof entry.key === 'string'
+      ? entry.key.split(',')
+      : [];
+    const firstSentence = content.split(/(?<=[.!?])\s+/)[0] || content;
+    pushUniqueShard(firstSentence, ['lorebook', ...keys], 5);
+    if (shards.length >= 16) break;
+  }
+
+  // 2. Extract scenario shard
+  if (rawScenario && rawScenario.trim().length >= 15) {
+    const cleanScen = rawScenario.split(/(?<=[.!?])\s+/)[0] || rawScenario;
+    pushUniqueShard(`Scenario: ${cleanScen}`, ['scenario', 'setting'], 5);
+  }
+
+  // 3. Extract factual / backstory sentences from description & personality (skipping the first 2 core identity sentences)
+  const combinedProse = `${rawDesc || ''}\n${rawPersonality || ''}`;
+  const rawChunks = combinedProse
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((c) => c.trim())
+    .filter((c) => c.length >= 22);
+
+  for (let i = 2; i < rawChunks.length; i++) {
+    if (shards.length >= 25) break;
+    pushUniqueShard(rawChunks[i], ['backstory'], 4);
+  }
+
+  return shards;
+}
+
+app.post('/api/personas/import-analyze', async (req, res) => {
+  const store = getDeviceStore(req);
+  const clientKeys = extractClientKeys(req);
+  const { rawJson } = req.body || {};
+
+  if (!rawJson) {
+    return res.status(400).json({ error: 'Please provide a JSON character card to analyze.' });
+  }
+
+  let parsed: any;
+  try {
+    parsed = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
+  } catch (err: any) {
+    return res.status(400).json({
+      error: `Invalid JSON syntax: ${err?.message || 'Could not parse JSON file.'}`,
+    });
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return res.status(400).json({ error: 'JSON root must be a valid character object.' });
+  }
+
+  // Detect format & unwrap V2/V3 `data` envelope or Character.AI `character` envelope
+  let cardFormat = 'Custom Character JSON';
+  let dataNode = parsed;
+  if (parsed.spec === 'chara_card_v3' || parsed.spec_version?.startsWith('3')) {
+    cardFormat = 'Tavern Card V3 (chara_card_v3)';
+    dataNode = parsed.data && typeof parsed.data === 'object' ? { ...parsed, ...parsed.data } : parsed;
+  } else if (parsed.spec === 'chara_card_v2' || (parsed.data && typeof parsed.data === 'object' && parsed.data.name)) {
+    cardFormat = 'SillyTavern / Tavern V2 (chara_card_v2)';
+    dataNode = { ...parsed, ...parsed.data };
+  } else if (parsed.character && typeof parsed.character === 'object') {
+    cardFormat = 'Character.AI / Pygmalion Export';
+    dataNode = { ...parsed, ...parsed.character };
+  } else if (parsed.char_name || parsed.first_mes || parsed.mes_example) {
+    cardFormat = 'TavernAI V1 Card';
+  }
+
+  const rawName = String(
+    dataNode.name || dataNode.char_name || dataNode.character_name || dataNode.title || 'Imported Character'
+  ).trim();
+  const charName = rawName.slice(0, 48) || 'Character';
+
+  const rawDesc = replaceTavernMacros(
+    String(dataNode.description || dataNode.char_persona || dataNode.persona || dataNode.definition || ''),
+    charName,
+    'User'
+  );
+  const rawPersonality = replaceTavernMacros(
+    String(dataNode.personality || dataNode.short_description || dataNode.summary || ''),
+    charName,
+    'User'
+  );
+  const rawScenario = replaceTavernMacros(
+    String(dataNode.scenario || dataNode.world_scenario || ''),
+    charName,
+    'you'
+  );
+  const rawFirstMes = replaceTavernMacros(
+    String(
+      dataNode.first_mes ||
+        dataNode.char_greeting ||
+        dataNode.greeting ||
+        (Array.isArray(dataNode.alternate_greetings) ? dataNode.alternate_greetings[0] : '') ||
+        ''
+    ),
+    charName,
+    'you'
+  );
+  const rawMesExample = replaceTavernMacros(
+    String(dataNode.mes_example || dataNode.example_dialogue || ''),
+    charName,
+    'you'
+  );
+  const rawSysPrompt = replaceTavernMacros(
+    String(dataNode.system_prompt || dataNode.post_history_instructions || dataNode.jailbreak || ''),
+    charName,
+    'User'
+  );
+  const characterBook = dataNode.character_book || parsed.character_book || null;
+  const rawTags: string[] = Array.isArray(dataNode.tags)
+    ? dataNode.tags.map((t: any) => String(t))
+    : [];
+
+  // Detect avatar URL if valid http(s) or data:image
+  const candidateAvatar = String(dataNode.avatar || dataNode.avatar_url || dataNode.image || '').trim();
+  const validAvatar =
+    candidateAvatar.startsWith('http://') ||
+    candidateAvatar.startsWith('https://') ||
+    candidateAvatar.startsWith('data:image/')
+      ? candidateAvatar
+      : undefined;
+
+  // Detect NSFW clearance from tags or card metadata
+  const nsfwRegex = /\b(nsfw|18\+|mature|explicit|uncensored|smut|erotic|dead\s*dove|adult)\b/i;
+  const allowNsfw = Boolean(
+    dataNode.nsfw === true ||
+      dataNode.allowNsfw === true ||
+      rawTags.some((t) => nsfwRegex.test(t)) ||
+      nsfwRegex.test(rawDesc) ||
+      nsfwRegex.test(rawSysPrompt)
+  );
+
+  // Detect if card has roleplay traits (*emotes*, first_mes, scenario, Tavern spec)
+  const isRoleplayCard = Boolean(
+    cardFormat.includes('Tavern') ||
+      cardFormat.includes('Character.AI') ||
+      rawFirstMes.length > 0 ||
+      rawScenario.length > 0 ||
+      /\*[^*]+\*/.test(rawFirstMes) ||
+      /\*[^*]+\*/.test(rawMesExample)
+  );
+
+  // Deterministic distillation baseline
+  const allSentences = `${rawPersonality ? rawPersonality + '. ' : ''}${rawDesc}`
+    .replace(/\n+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 10);
+
+  let distilledDescription =
+    allSentences.slice(0, 3).join(' ').slice(0, 380) ||
+    `${charName} is a distinctive conversational and roleplay persona.`;
+  if (rawPersonality && !distilledDescription.toLowerCase().includes(rawPersonality.slice(0, 20).toLowerCase())) {
+    distilledDescription = `${rawPersonality.slice(0, 140)}. ${distilledDescription}`.slice(0, 400);
+  }
+
+  let styleAnchors = extractDialogueAnchorsFromExamples(rawMesExample, rawFirstMes, charName);
+  if (styleAnchors.length === 0) {
+    styleAnchors = [
+      rawFirstMes ? rawFirstMes.slice(0, 140) : `Let's talk properly, just you and me.`,
+    ];
+  }
+
+  let negativeConstraints: string[] = [
+    `Never speak, act, or write dialogue lines on behalf of User.`,
+    `Stay authentically in character as ${charName} without breaking the fourth wall or giving generic AI disclaimers.`,
+  ];
+  if (rawSysPrompt) {
+    const sysLines = rawSysPrompt
+      .split(/\n+|(?<=[.!?])\s+/)
+      .map((l) => l.trim())
+      .filter((l) => l.length >= 15 && l.length <= 130)
+      .slice(0, 2);
+    negativeConstraints.push(...sysLines);
+  }
+
+  let userRapport = rawScenario
+    ? rawScenario.split(/(?<=[.!?])\s+/)[0].slice(0, 95)
+    : `engaged in an authentic character dynamic with you as ${charName}`;
+
+  let extractedShards = extractLoreShardsFromCard(
+    rawDesc,
+    rawPersonality,
+    rawScenario,
+    characterBook,
+    charName
+  );
+
+  // Also include any pre-exported Kōrero memory shards if present
+  if (Array.isArray(dataNode.initialMemoryShards)) {
+    for (const s of dataNode.initialMemoryShards) {
+      if (s && typeof s.s === 'string') {
+        extractedShards.push({
+          s: s.s.slice(0, 120),
+          k: Array.isArray(s.k) ? s.k : tokenizeForMemory(s.s).slice(0, 5),
+          w: Number(s.w) || 4,
+        });
+      }
+    }
+  }
+
+  // Optional AI Distillation Pass when an API key is configured on this device
+  let distilledByAi = false;
+  const hasAnyAiKey = Boolean(
+    clientKeys.groqKey?.trim() ||
+      clientKeys.openRouterKey?.trim() ||
+      clientKeys.nvidiaKey?.trim() ||
+      clientKeys.cloudflareKey?.trim() ||
+      process.env.CLOUDFLARE_API_TOKEN?.trim()
+  );
+
+  if (hasAnyAiKey && (rawDesc.length > 180 || rawMesExample.length > 80 || rawScenario.length > 40)) {
+    try {
+      const distillPrompt = `You are an expert character card compiler for Kōrero. Distill this character card into a compact, high-coherence persona profile and atomic memory shards so the character sounds 100% authentic without bloating the prompt.
+
+Character Name: ${charName}
+Raw Description: ${rawDesc.slice(0, 1800)}
+Raw Personality: ${rawPersonality.slice(0, 600)}
+Raw Scenario: ${rawScenario.slice(0, 500)}
+First Greeting: ${rawFirstMes.slice(0, 500)}
+Example Dialogue: ${rawMesExample.slice(0, 800)}
+System Instructions: ${rawSysPrompt.slice(0, 400)}
+
+Return ONLY valid JSON matching this exact structure (no markdown fences or extra text):
+{
+  "description": "2 to 3 vivid, dense sentences capturing ${charName}'s core personality, speaking voice, demeanor, and role.",
+  "userRapport": "1 concise line (under 90 chars) describing how ${charName} views and interacts with the user.",
+  "style_anchor": ["3 to 4 short, authentic in-character quotes or *action* + dialogue lines showing how ${charName} talks"],
+  "negative_constraints": ["2 to 3 specific behavioral rules for ${charName} (e.g., never act for the user, maintain their specific speech habit)"],
+  "loreShards": [
+    { "s": "Single atomic fact about ${charName}'s backstory, world, abilities, or relationships (max 110 chars)", "k": ["keyword1", "keyword2", "keyword3"], "w": 4 }
+  ]
+}`;
+
+      const aiRes = await generateModelContent(
+        { contents: distillPrompt, temperature: 0.3 },
+        clientKeys,
+        store.selectedModelId
+      );
+      const rawText = aiRes?.text?.trim() || '';
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const aiObj = JSON.parse(jsonMatch[0]);
+        if (typeof aiObj.description === 'string' && aiObj.description.trim().length >= 25) {
+          distilledDescription = replaceTavernMacros(aiObj.description.trim(), charName, 'User').slice(0, 420);
+          distilledByAi = true;
+        }
+        if (typeof aiObj.userRapport === 'string' && aiObj.userRapport.trim().length >= 8) {
+          userRapport = replaceTavernMacros(aiObj.userRapport.trim(), charName, 'you').slice(0, 95);
+        }
+        if (Array.isArray(aiObj.style_anchor) && aiObj.style_anchor.length > 0) {
+          const cleanAiAnchors = aiObj.style_anchor
+            .map((a: any) => replaceTavernMacros(String(a).trim(), charName, 'you'))
+            .filter((a: string) => a.length >= 8 && a.length <= 180)
+            .slice(0, 5);
+          if (cleanAiAnchors.length > 0) {
+            styleAnchors = cleanAiAnchors;
+          }
+        }
+        if (Array.isArray(aiObj.negative_constraints) && aiObj.negative_constraints.length > 0) {
+          const cleanRules = aiObj.negative_constraints
+            .map((r: any) => replaceTavernMacros(String(r).trim(), charName, 'User'))
+            .filter((r: string) => r.length >= 10 && r.length <= 140)
+            .slice(0, 4);
+          if (cleanRules.length > 0) {
+            negativeConstraints = cleanRules;
+          }
+        }
+        if (Array.isArray(aiObj.loreShards) && aiObj.loreShards.length > 0) {
+          const aiShards = aiObj.loreShards
+            .filter((sh: any) => sh && typeof sh.s === 'string' && sh.s.trim().length >= 12)
+            .map((sh: any) => ({
+              s: replaceTavernMacros(String(sh.s).trim(), charName, 'User').slice(0, 120),
+              k: Array.isArray(sh.k)
+                ? sh.k.map((k: any) => String(k).toLowerCase().trim()).filter(Boolean).slice(0, 6)
+                : tokenizeForMemory(String(sh.s)).slice(0, 5),
+              w: Math.max(1, Math.min(5, Number(sh.w) || 4)),
+            }));
+          // Combine AI-distilled shards + Lorebook shards (up to 25 total)
+          const merged = [...aiShards];
+          for (const detShard of extractedShards) {
+            if (merged.length >= 25) break;
+            if (!merged.some((m) => m.s.toLowerCase() === detShard.s.toLowerCase())) {
+              merged.push(detShard);
+            }
+          }
+          extractedShards = merged.slice(0, 25);
+        }
+      }
+    } catch (aiErr) {
+      // Keep deterministic distillation if AI pass fails
+    }
+  }
+
+  const analysis: CharacterImportAnalysis = {
+    cardFormat,
+    name: charName,
+    description: distilledDescription,
+    avatarUrl: validAvatar,
+    allowNsfw,
+    isRoleplayCard,
+    firstMessage: rawFirstMes.slice(0, 1200),
+    scenario: rawScenario.slice(0, 350),
+    style_anchor: styleAnchors.slice(0, 5),
+    negative_constraints: negativeConstraints.slice(0, 5),
+    intellect: 7,
+    thoughtfulness: 'balanced',
+    pacingDelaySeconds: 1.0,
+    userRapport,
+    extractedShards: extractedShards.slice(0, 25),
+    distilledByAi,
+  };
+
+  return res.json({ success: true, analysis });
+});
+
 app.post('/api/personas', (req, res) => {
   const store = getDeviceStore(req);
   const {
@@ -3348,6 +3773,11 @@ app.post('/api/personas', (req, res) => {
     intellect,
     thoughtfulness,
     pacingDelaySeconds,
+    isRoleplayCard,
+    firstMessage,
+    scenario,
+    initialMemoryShards,
+    userRapport,
   } = req.body;
 
   if (!name || typeof name !== 'string' || !name.trim()) {
@@ -3376,9 +3806,30 @@ app.post('/api/personas', (req, res) => {
     intellect: typeof intellect === 'number' ? intellect : 7,
     thoughtfulness: thoughtfulness || 'balanced',
     pacingDelaySeconds: typeof pacingDelaySeconds === 'number' ? pacingDelaySeconds : 1.0,
+    isRoleplayCard: Boolean(isRoleplayCard),
+    firstMessage: typeof firstMessage === 'string' && firstMessage.trim() ? firstMessage.trim() : undefined,
+    scenario: typeof scenario === 'string' && scenario.trim() ? scenario.trim() : undefined,
   };
 
   store.personas.push(newPersona);
+
+  // Initialize Coherent Memory Bank and seed any imported lore/backstory shards
+  const bank = ensureBotMemoryBank(store, newPersona);
+  if (typeof userRapport === 'string' && userRapport.trim()) {
+    bank.u.rapport = userRapport.trim().slice(0, 95);
+    bank.u.updatedAt = Math.floor(Date.now() / 1000);
+  }
+  if (Array.isArray(initialMemoryShards)) {
+    for (const shard of initialMemoryShards.slice(0, 30)) {
+      if (shard && typeof shard.s === 'string' && shard.s.trim()) {
+        const tags = Array.isArray(shard.k)
+          ? shard.k.map((k: any) => String(k).trim())
+          : tokenizeForMemory(shard.s);
+        upsertBotMemoryShard(bank, shard.s, tags, Number(shard.w) || 4, store.currentContextId);
+      }
+    }
+  }
+
   persistDeviceStores();
   res.json({ success: true, persona: newPersona, personas: store.personas });
 });
@@ -3404,6 +3855,9 @@ app.put('/api/personas/:id', (req, res) => {
     intellect,
     thoughtfulness,
     pacingDelaySeconds,
+    isRoleplayCard,
+    firstMessage,
+    scenario,
   } = req.body;
   const oldName = existing.name;
   const newName = name !== undefined && name.trim() ? name.trim() : existing.name;
@@ -3422,6 +3876,9 @@ app.put('/api/personas/:id', (req, res) => {
     intellect: intellect !== undefined ? Number(intellect) : existing.intellect,
     thoughtfulness: thoughtfulness !== undefined ? thoughtfulness : existing.thoughtfulness,
     pacingDelaySeconds: pacingDelaySeconds !== undefined ? Number(pacingDelaySeconds) : existing.pacingDelaySeconds,
+    isRoleplayCard: isRoleplayCard !== undefined ? Boolean(isRoleplayCard) : existing.isRoleplayCard,
+    firstMessage: firstMessage !== undefined ? (firstMessage ? String(firstMessage).trim() : undefined) : existing.firstMessage,
+    scenario: scenario !== undefined ? (scenario ? String(scenario).trim() : undefined) : existing.scenario,
   };
 
   // If name changed, update speaker in current chat messages
@@ -4098,7 +4555,18 @@ app.post('/api/chat/turn', async (req, res) => {
     currentCtx
   );
 
-  const promptContents = `${promptHistory}
+  const isAdaptiveRpTurn = Boolean(
+    isSingleBotChat && (persona.isRoleplayCard || persona.firstMessage || persona.scenario)
+  );
+  const scenarioLine =
+    isAdaptiveRpTurn && persona.scenario ? `\nScenario / Setting Context: ${persona.scenario}\n` : '';
+  const closingStyleInstruction = isAdaptiveRpTurn
+    ? `Reply as ${persona.name} directly to the user in authentic 1-on-1 character/roleplay style (1-2 expressive paragraphs max; you may weave *physical actions, expressions, and scene details* with spoken dialogue if natural to ${persona.name}). Write ONLY ${persona.name}'s turn and wait for the user's reply.`
+    : persona.isRoleplayCard
+    ? `Reply as ${persona.name} in concise group-chat mode (1-3 punchy sentences max; keep any *action emotes* brief so the group room flows naturally).`
+    : `Reply as ${persona.name} directly to the user. 1-3 sentences max, casual chat style.`;
+
+  const promptContents = `${promptHistory}${scenarioLine}
 ---
 You are ${persona.name}.
 ${persona.description}
@@ -4121,7 +4589,7 @@ ${relevanceInstruction}
 Examples of how you talk:
 ${styleAnchorsList}
 
-Reply as ${persona.name} directly to the user. 1-3 sentences max, casual chat style.`;
+${closingStyleInstruction}`;
 
   try {
     let currentPrompt = promptContents;
@@ -4375,6 +4843,38 @@ INSTRUCTION:
       completedPixelTask = pt;
     }
 
+    // Automatically record Task / Execution / Research memory shards alongside User Conversation memory
+    const botBank = ensureBotMemoryBank(store, persona);
+    if (completedPixelTask) {
+      const taskFact = `Task [${completedPixelTask.description.slice(0, 45)}]: ${replyText.slice(0, 65)}`;
+      upsertBotMemoryShard(
+        botBank,
+        taskFact,
+        ['task', ...tokenizeForMemory(completedPixelTask.description).slice(0, 4)],
+        4,
+        store.currentContextId
+      );
+    } else if (execSuccessUsed && execOutputUsed) {
+      const firstLineOut = execOutputUsed.split('\n').map((l) => l.trim()).find(Boolean) || '';
+      const execFact = `Ran Python (${(lastHumanMsg?.text || currentCtx?.topic_label || 'calc').slice(0, 35)}): ${firstLineOut.slice(0, 65)}`;
+      upsertBotMemoryShard(
+        botBank,
+        execFact,
+        ['exec', 'python', ...tokenizeForMemory(lastHumanMsg?.text || '').slice(0, 3)],
+        3,
+        store.currentContextId
+      );
+    } else if (searchQueryUsed) {
+      const searchFact = `Searched "${searchQueryUsed.slice(0, 40)}": ${replyText.slice(0, 65)}`;
+      upsertBotMemoryShard(
+        botBank,
+        searchFact,
+        ['search', ...tokenizeForMemory(searchQueryUsed).slice(0, 4)],
+        3,
+        store.currentContextId
+      );
+    }
+
     const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const newMsg: ChatMessage = {
@@ -4482,18 +4982,27 @@ app.post('/api/chat/new', async (req, res) => {
 
   // Pick first speaker from allowed personas
   const allowedBots = store.personas.filter((p) => validAllowedIds.includes(p.id) || validAllowedIds.includes(p.name));
-  const firstSpeaker = allowedBots[0]?.name || store.personas[0]?.name || 'Rook';
+  const firstPersona = allowedBots[0] || store.personas[0];
+  const firstSpeaker = firstPersona?.name || 'Rook';
+
+  // If starting a 1-on-1 chat with a character that has an opening greeting (firstMessage / first_mes), use it!
+  let openingText = `New chat session started: "${label}". What should we dive into?`;
+  if (allowedBots.length === 1 && firstPersona?.firstMessage) {
+    const knownUserName = store.botMemories?.[firstPersona.id]?.u?.name || 'you';
+    openingText = replaceTavernMacros(firstPersona.firstMessage, firstPersona.name, knownUserName);
+  }
 
   const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const openingMsg: ChatMessage = {
     id: store.messageAutoId++,
     speaker: firstSpeaker,
-    text: `New chat session started: "${label}". What should we dive into?`,
+    text: openingText,
     timestamp: timeStr,
     session_id: 'session-' + Date.now(),
     context_id: newCtxId,
   };
   store.messages.push(openingMsg);
+  persistDeviceStores();
 
   // Summarize old context in background if needed
   const oldCtx = store.contexts.find((c) => c.context_id === oldContextId);

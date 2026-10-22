@@ -108,6 +108,30 @@ export interface Persona {
   intellect?: number; // 1-10 scale
   thoughtfulness?: ThoughtfulnessLevel;
   pacingDelaySeconds?: number; // 0 to 4s extra thoughtful pause
+  isRoleplayCard?: boolean; // Adaptive mode: expressive RP in 1-on-1, concise in group chat
+  firstMessage?: string; // Tavern first_mes opening greeting for 1-on-1 chats
+  scenario?: string; // Concise scenario context for 1-on-1 chats
+  initialMemoryShards?: Array<{ s: string; k: string[]; w: number }>; // Used on creation from JSON import
+  userRapport?: string; // Used on creation from JSON import
+}
+
+export interface CharacterImportAnalysis {
+  cardFormat: string;
+  name: string;
+  description: string;
+  avatarUrl?: string;
+  allowNsfw: boolean;
+  isRoleplayCard: boolean;
+  firstMessage: string;
+  scenario: string;
+  style_anchor: string[];
+  negative_constraints: string[];
+  intellect: number;
+  thoughtfulness: ThoughtfulnessLevel;
+  pacingDelaySeconds: number;
+  userRapport: string;
+  extractedShards: Array<{ s: string; k: string[]; w: number }>;
+  distilledByAi: boolean;
 }
 
 export interface BotMemoryUserCore {

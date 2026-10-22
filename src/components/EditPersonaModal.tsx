@@ -13,16 +13,16 @@ interface EditPersonaModalProps {
 }
 
 const PRESET_AVATARS = [
-  { name: 'Tactical Analyst', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Researcher', url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Philosopher', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Strategist', url: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Technologist', url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Engineer', url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Scholar', url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Creative Writer', url: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Curator', url: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=200&auto=format&fit=crop&q=80' },
-  { name: 'Critic', url: 'https://images.unsplash.com/photo-1501196354995-cbb51c65aaea?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Tactical Analyst', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Tactical&backgroundColor=1e293b' },
+  { name: 'Researcher', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Researcher&backgroundColor=0f172a' },
+  { name: 'Philosopher', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Philosopher&backgroundColor=1e1b4b' },
+  { name: 'Strategist', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Strategist&backgroundColor=172554' },
+  { name: 'Technologist', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Technologist&backgroundColor=042f2e' },
+  { name: 'Engineer', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Engineer&backgroundColor=27272a' },
+  { name: 'Scholar', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Scholar&backgroundColor=3f3f46' },
+  { name: 'Creative Writer', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Writer&backgroundColor=31102f' },
+  { name: 'Curator', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Curator&backgroundColor=1c1917' },
+  { name: 'Critic', url: 'https://api.dicebear.com/7.x/Notionists/svg?seed=Critic&backgroundColor=2e1065' },
 ];
 
 const PRESET_COLORS = [
@@ -70,6 +70,9 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
   const [newConstraint, setNewConstraint] = useState('');
   const [styleAnchors, setStyleAnchors] = useState<string[]>([]);
   const [newStyleAnchor, setNewStyleAnchor] = useState('');
+  const [isRoleplayCard, setIsRoleplayCard] = useState(false);
+  const [firstMessage, setFirstMessage] = useState('');
+  const [scenario, setScenario] = useState('');
 
   // Per-Bot Coherent Memory Bank state
   const [memoryBank, setMemoryBank] = useState<BotMemoryBank | null>(null);
@@ -127,6 +130,9 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
       setPacingDelaySeconds(persona.pacingDelaySeconds ?? (persona.thoughtfulness === 'scholarly' ? 3.0 : persona.thoughtfulness === 'thoughtful' ? 2.2 : persona.thoughtfulness === 'quick' ? 0 : 1.0));
       setConstraints(persona.negative_constraints || []);
       setStyleAnchors(persona.style_anchor || []);
+      setIsRoleplayCard(Boolean(persona.isRoleplayCard));
+      setFirstMessage(persona.firstMessage || '');
+      setScenario(persona.scenario || '');
       fetchBotMemory(persona.id);
     }
   }, [persona, isOpen]);
@@ -284,6 +290,9 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
         intellect,
         thoughtfulness,
         pacingDelaySeconds,
+        isRoleplayCard,
+        firstMessage: firstMessage.trim() || undefined,
+        scenario: scenario.trim() || undefined,
       });
       onClose();
     } catch (err: any) {
@@ -390,19 +399,17 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
                   Coherent Bot Memory Bank
                 </span>
               </div>
-              <div className="flex items-center gap-1.5 text-[10px] font-mono">
-                <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/70 text-emerald-300">
-                  {shardCount}/40 shards
-                </span>
+              <div className="flex items-center gap-1.5 text-[10px] font-mono tabular-nums text-neutral-400">
+                <span className="text-emerald-300">{shardCount}/40 shards</span>
+                <span>·</span>
                 <span
-                  className="px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/70 text-cyan-300"
+                  className="text-cyan-300"
                   title="Only Top-3 relevant shards are injected per turn as Micro-YAML (capped <= 150 tokens)"
                 >
                   ~{approxPromptTokens}/150 tok prompt
                 </span>
-                <span className="px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-400">
-                  {(byteSize / 1024).toFixed(1)}/4.0 KB
-                </span>
+                <span>·</span>
+                <span>{(byteSize / 1024).toFixed(1)}/4.0 KB</span>
               </div>
             </div>
 
@@ -641,9 +648,14 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
 
           {/* Personality / Role Description */}
           <div>
-            <label className="block text-[11px] font-medium text-neutral-300 mb-1">
-              Personality & Role Description
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] font-medium text-neutral-300">
+                Personality & Role Description
+              </label>
+              <span className="text-[10px] font-mono tabular-nums text-neutral-500">
+                {description.length}/420 chars
+              </span>
+            </div>
             <textarea
               rows={2}
               value={description}
@@ -651,6 +663,65 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
               placeholder="How does this persona interact and debate?"
               className="w-full bg-neutral-950 border border-neutral-800 rounded p-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
             />
+          </div>
+
+          {/* Adaptive Roleplay & 1-on-1 Greeting Settings */}
+          <div className="p-3 rounded border border-neutral-800 bg-neutral-950 space-y-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <Sparkles size={13} className="text-amber-400" />
+                  <span className="font-semibold text-xs text-white">
+                    Adaptive Roleplay & Character Mode
+                  </span>
+                </div>
+                <p className="text-[11px] text-neutral-400 mt-0.5 leading-snug">
+                  In 1-on-1 chats, enables expressive roleplay (*actions*, 1–2 paragraphs, and opening greeting). In multi-bot group chats, stays concise (1–3 sentences).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRoleplayCard(!isRoleplayCard)}
+                className={`w-9 h-5 rounded-full transition-colors relative p-0.5 shrink-0 cursor-pointer ${
+                  isRoleplayCard ? 'bg-emerald-600' : 'bg-neutral-800'
+                }`}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                    isRoleplayCard ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {(isRoleplayCard || firstMessage || scenario) && (
+              <div className="space-y-2 pt-2 border-t border-neutral-800/80">
+                <div>
+                  <label className="block text-[10px] font-medium text-neutral-400 mb-1">
+                    Active Scenario / Setting Context (Injected in 1-on-1 RP)
+                  </label>
+                  <input
+                    type="text"
+                    value={scenario}
+                    onChange={(e) => setScenario(e.target.value)}
+                    placeholder="e.g. Late night in the Neo-Veridia archive..."
+                    className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-neutral-400 mb-1">
+                    1-on-1 Opening Greeting (first_mes — auto-sent when starting a 1-on-1 chat)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={firstMessage}
+                    onChange={(e) => setFirstMessage(e.target.value)}
+                    placeholder="Optional opening greeting when starting a new 1-on-1 chat with this character..."
+                    className="w-full bg-neutral-900 border border-neutral-800 rounded p-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600 leading-relaxed"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Dedicated AI Model Selector */}
