@@ -19,9 +19,17 @@ import { ImageGenerateModal } from './components/ImageGenerateModal';
 import {
   saveMessagesToStorage,
   loadMessagesFromStorage,
+  loadAllMessagesFromStorage,
   saveContextsToStorage,
   loadContextsFromStorage,
+  savePersonasToStorage,
+  loadPersonasFromStorage,
+  saveBotMemoriesToStorage,
+  loadBotMemoriesFromStorage,
   mergeMessages,
+  mergeContexts,
+  mergePersonas,
+  safeLocalStorageSetItem,
 } from './utils/chatStorage';
 import {
   KORERO_CHARACTERS,
@@ -93,7 +101,16 @@ export default function App() {
     return [];
   });
 
-  const [personas, setPersonas] = useState<Persona[]>([]);
+  const [personas, setPersonas] = useState<Persona[]>(() => {
+    try {
+      const raw = localStorage.getItem('korero_all_personas');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return [];
+  });
   const [nextSpeaker, setNextSpeaker] = useState<string>('Rook');
   const [activePoll, setActivePoll] = useState<Poll | null>(null);
   const [activeDirective, setActiveDirective] = useState<{
@@ -177,7 +194,7 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('korero_device_keys', JSON.stringify(deviceKeys));
+      safeLocalStorageSetItem('korero_device_keys', JSON.stringify(deviceKeys));
     } catch (e) {}
   }, [deviceKeys]);
 
@@ -195,12 +212,19 @@ export default function App() {
     }
   }, [contexts]);
 
+  // Persist personas to IndexedDB + LocalStorage
+  useEffect(() => {
+    if (personas.length > 0) {
+      savePersonasToStorage(personas).catch(() => {});
+    }
+  }, [personas]);
+
   // Persist currentContextId to storage
   useEffect(() => {
     if (currentContextId) {
       try {
-        localStorage.setItem('korero_active_context_id', currentContextId);
-        localStorage.setItem(`korero_chat_context_id_${deviceId}`, currentContextId);
+        safeLocalStorageSetItem('korero_active_context_id', currentContextId);
+        safeLocalStorageSetItem(`korero_chat_context_id_${deviceId}`, currentContextId);
       } catch (e) {}
     }
   }, [currentContextId, deviceId]);
@@ -347,51 +371,135 @@ export default function App() {
     }
   };
 
-  // Initial fetch of chat state
+  // Initial fetch of chat state (merges IndexedDB + LocalStorage + Server so discussion groups are never lost)
   const fetchState = async () => {
+    const preferredCtxId =
+      localStorage.getItem('korero_active_context_id') ||
+      localStorage.getItem(`korero_chat_context_id_${deviceId}`) ||
+      currentContextId ||
+      'ctx-1';
+
     try {
-      // First load existing local messages immediately to guarantee no blank screen
-      const targetCtx = currentContextId || localStorage.getItem('korero_active_context_id') || 'ctx-1';
-      const storedLocalMsgs = await loadMessagesFromStorage(targetCtx);
+      // 1. Load local discussion groups, personas, memories, and active messages immediately
+      const [localContexts, localPersonas, localBotMemories, storedLocalMsgs] = await Promise.all([
+        loadContextsFromStorage(),
+        loadPersonasFromStorage(),
+        loadBotMemoriesFromStorage(),
+        loadMessagesFromStorage(preferredCtxId),
+      ]);
+
+      if (localContexts.length > 0) {
+        setContexts(localContexts);
+      }
+      if (localPersonas.length > 0) {
+        setPersonas(localPersonas);
+      }
       if (storedLocalMsgs.length > 0 && messages.length === 0) {
         setMessages(storedLocalMsgs);
       }
 
-      const res = await fetch('/api/chat/state', {
+      // 2. Fetch server state while passing preferredCtxId so server knows which group the user was viewing
+      const res = await fetch(`/api/chat/state?contextId=${encodeURIComponent(preferredCtxId)}`, {
         headers: getClientAuthHeaders(),
       });
       if (!res.ok) throw new Error('Failed to load chat state');
       const data = await res.json();
 
-      const activeCtxId = data.currentContextId || targetCtx;
-      const cachedList = await loadMessagesFromStorage(activeCtxId);
-      const serverMsgs = data.messages || [];
+      // 3. Merge local and server discussion groups so non-default groups are NEVER overwritten
+      let mergedContexts = mergeContexts(localContexts, data.contexts || []);
 
-      // Merge local and server messages deduplicated by ID to prevent deletion
-      const merged = mergeMessages(cachedList, serverMsgs);
+      // Load all cached messages across all discussion groups (including any orphaned context keys in storage)
+      const allLocalMsgs = await loadAllMessagesFromStorage(mergedContexts.map((c) => c.context_id));
 
-      if (merged.length > serverMsgs.length) {
-        // Sync cached messages back to server so nothing is wiped!
-        fetch('/api/chat/sync', {
-          method: 'POST',
-          headers: getClientAuthHeaders(),
-          body: JSON.stringify({
-            messages: merged,
-            contexts: data.contexts?.length ? data.contexts : contexts,
-            currentContextId: activeCtxId,
-          }),
-        }).catch(() => {});
+      // Recover any discussion group that has messages in storage but was missing from contexts list
+      for (const m of allLocalMsgs) {
+        if (m.context_id && !mergedContexts.some((c) => c.context_id === m.context_id)) {
+          mergedContexts.push({
+            context_id: m.context_id,
+            topic_label: m.context_id === 'ctx-1' ? 'General Discussion' : `Discussion (${m.speaker || 'Saved'})`,
+            summary: null,
+            created_at: new Date().toISOString(),
+            last_active_at: new Date().toISOString(),
+          });
+        }
       }
 
-      setMessages(merged.length > 0 ? merged : serverMsgs);
-      await saveMessagesToStorage(activeCtxId, merged.length > 0 ? merged : serverMsgs);
+      // 4. Determine active context ID: preserve the user's active group if it exists in mergedContexts
+      const activeCtxId = mergedContexts.some((c) => c.context_id === preferredCtxId)
+        ? preferredCtxId
+        : data.currentContextId || 'ctx-1';
 
-      if (data.contexts && data.contexts.length > 0) {
-        setContexts(data.contexts);
-        saveContextsToStorage(data.contexts).catch(() => {});
+      // 5. Merge personas
+      let mergedPersonas = mergePersonas(localPersonas, data.personas || []);
+
+      // 6. Merge messages for the active context
+      const localActiveMsgs = await loadMessagesFromStorage(activeCtxId);
+      const serverActiveMsgs =
+        data.currentContextId === activeCtxId ? data.messages || [] : [];
+      let finalActiveMsgs = mergeMessages(localActiveMsgs, serverActiveMsgs);
+
+      // 7. Check if client has discussion groups, messages, personas, or activeCtxId that need syncing to server
+      const serverContextIds = new Set((data.contexts || []).map((c: ChatContext) => c.context_id));
+      const hasUnsyncedContexts = mergedContexts.some((c) => !serverContextIds.has(c.context_id));
+      const hasMoreMessages =
+        allLocalMsgs.length > (data.allMessagesCount || 0) ||
+        finalActiveMsgs.length > serverActiveMsgs.length;
+      const hasCustomPersonas = mergedPersonas.length > (data.personas?.length || 0);
+      const hasLocalMemories = Object.keys(localBotMemories || {}).length > 0;
+      const needsContextSwitch = data.currentContextId !== activeCtxId;
+
+      if (
+        hasUnsyncedContexts ||
+        hasMoreMessages ||
+        hasCustomPersonas ||
+        hasLocalMemories ||
+        needsContextSwitch
+      ) {
+        try {
+          const syncRes = await fetch('/api/chat/sync', {
+            method: 'POST',
+            headers: getClientAuthHeaders(),
+            body: JSON.stringify({
+              messages: mergeMessages(allLocalMsgs, data.messages || []),
+              contexts: mergedContexts,
+              currentContextId: activeCtxId,
+              personas: mergedPersonas,
+              botMemories: localBotMemories,
+            }),
+          });
+          if (syncRes.ok) {
+            const syncData = await syncRes.json();
+            if (Array.isArray(syncData.contexts) && syncData.contexts.length > 0) {
+              mergedContexts = mergeContexts(mergedContexts, syncData.contexts);
+            }
+            if (Array.isArray(syncData.messages)) {
+              finalActiveMsgs = mergeMessages(finalActiveMsgs, syncData.messages);
+            }
+            if (Array.isArray(syncData.personas) && syncData.personas.length > 0) {
+              mergedPersonas = mergePersonas(mergedPersonas, syncData.personas);
+            }
+            if (syncData.botMemories) {
+              saveBotMemoriesToStorage(syncData.botMemories).catch(() => {});
+            }
+          }
+        } catch (syncErr) {
+          console.warn('Sync warning:', syncErr);
+        }
+      } else if (data.botMemories) {
+        saveBotMemoriesToStorage(data.botMemories).catch(() => {});
       }
-      setPersonas(data.personas || []);
-      if (data.currentContextId) setCurrentContextId(data.currentContextId);
+
+      setCurrentContextId(activeCtxId);
+      setContexts(mergedContexts);
+      setPersonas(mergedPersonas);
+      setMessages(finalActiveMsgs);
+
+      await Promise.all([
+        saveContextsToStorage(mergedContexts),
+        saveMessagesToStorage(activeCtxId, finalActiveMsgs),
+        savePersonasToStorage(mergedPersonas),
+      ]);
+
       if (data.nextSpeaker) setNextSpeaker(data.nextSpeaker);
       if (data.activeRecallTopic) setActiveRecall(data.activeRecallTopic);
       if (data.nsfwMode !== undefined) setNsfwMode(Boolean(data.nsfwMode));
@@ -399,10 +507,15 @@ export default function App() {
       if (data.activeDirective !== undefined) setActiveDirective(data.activeDirective);
       scrollToBottom('auto');
     } catch (err) {
-      console.warn('Could not connect to server, retaining local offline messages:', err);
-      const targetCtx = currentContextId || 'ctx-1';
-      const cached = await loadMessagesFromStorage(targetCtx);
-      if (cached.length > 0) setMessages(cached);
+      console.warn('Could not connect to server, retaining local offline state:', err);
+      const [cachedContexts, cachedMsgs, cachedPersonas] = await Promise.all([
+        loadContextsFromStorage(),
+        loadMessagesFromStorage(preferredCtxId),
+        loadPersonasFromStorage(),
+      ]);
+      if (cachedContexts.length > 0) setContexts(cachedContexts);
+      if (cachedMsgs.length > 0) setMessages(cachedMsgs);
+      if (cachedPersonas.length > 0) setPersonas(cachedPersonas);
     }
   };
 
@@ -512,12 +625,21 @@ export default function App() {
       });
       if (!res.ok) throw new Error('Failed to create new chat');
       const data = await res.json();
+      const updatedContexts = mergeContexts(contexts, data.contexts || [data.newContext]);
       setCurrentContextId(data.currentContextId);
-      setContexts(data.contexts);
+      setContexts(updatedContexts);
       setMessages([data.message]);
       setActivePoll(null);
       setActiveDirective(null);
       if (data.nextSpeaker) setNextSpeaker(data.nextSpeaker);
+
+      // Immediately persist new discussion group and opening message to IndexedDB + LocalStorage
+      safeLocalStorageSetItem('korero_active_context_id', data.currentContextId);
+      await Promise.all([
+        saveContextsToStorage(updatedContexts),
+        saveMessagesToStorage(data.currentContextId, [data.message]),
+      ]);
+
       showToast(
         allowedIds.length === 1
           ? `Started 1-on-1 chat`
@@ -539,7 +661,9 @@ export default function App() {
       });
       if (!res.ok) throw new Error('Failed to update conversation bots');
       const data = await res.json();
-      setContexts(data.contexts);
+      const updatedContexts = mergeContexts(contexts, data.contexts || []);
+      setContexts(updatedContexts);
+      await saveContextsToStorage(updatedContexts);
       showToast(
         allowedIds.length === 1
           ? `Updated to 1-on-1 chat (1 bot active)`
@@ -564,6 +688,7 @@ export default function App() {
     }
     const data = await res.json();
     setPersonas(data.personas);
+    await savePersonasToStorage(data.personas);
 
     if (updatedData.name) {
       setMessages((prev) =>
@@ -592,6 +717,7 @@ export default function App() {
     }
     const data = await res.json();
     setPersonas(data.personas);
+    await savePersonasToStorage(data.personas);
     showToast(`Created bot character: ${data.persona.name}`);
   };
 
@@ -608,6 +734,7 @@ export default function App() {
       }
       const data = await res.json();
       setPersonas(data.personas);
+      await savePersonasToStorage(data.personas);
       showToast('Bot character removed');
     } catch (err: any) {
       showToast(err.message || 'Error deleting bot');
@@ -622,6 +749,7 @@ export default function App() {
     try {
       // 1. Immediately switch and load local messages to avoid flashing
       setCurrentContextId(contextId);
+      safeLocalStorageSetItem('korero_active_context_id', contextId);
       const cached = await loadMessagesFromStorage(contextId);
       if (cached.length > 0) {
         setMessages(cached);
@@ -640,8 +768,8 @@ export default function App() {
 
       const activeCtx = contexts.find((c) => c.context_id === contextId);
       await fetchActivePoll(contextId);
-      // Refresh state to fetch any active directive
-      const stateRes = await fetch('/api/chat/state', {
+      // Refresh state to fetch any active directive for this contextId
+      const stateRes = await fetch(`/api/chat/state?contextId=${encodeURIComponent(contextId)}`, {
         headers: getClientAuthHeaders(),
       });
       if (stateRes.ok) {
@@ -854,7 +982,7 @@ export default function App() {
       const res = await fetch('/api/chat/turn', {
         method: 'POST',
         headers: getClientAuthHeaders(),
-        body: JSON.stringify({ personaName: speakerToCall }),
+        body: JSON.stringify({ personaName: speakerToCall, contextId: currentContextId }),
       });
 
       if (!res.ok) {
@@ -864,6 +992,9 @@ export default function App() {
 
       const data = await res.json();
       setMessages((prev) => [...prev, data.message]);
+      if (data.botMemories) {
+        saveBotMemoriesToStorage(data.botMemories).catch(() => {});
+      }
       if (data.nextSpeaker) {
         setNextSpeaker(data.nextSpeaker);
       }
@@ -1177,7 +1308,7 @@ export default function App() {
       const res = await fetch('/api/chat/message', {
         method: 'POST',
         headers: getClientAuthHeaders(),
-        body: JSON.stringify({ text: raw, speaker: userName }),
+        body: JSON.stringify({ text: raw, speaker: userName, contextId: currentContextId }),
       });
 
       if (!res.ok) throw new Error('Failed to send message');
@@ -1217,6 +1348,7 @@ export default function App() {
           text: stickerText,
           speaker: userName,
           sticker: stickerData,
+          contextId: currentContextId,
         }),
       });
 

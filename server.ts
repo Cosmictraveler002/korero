@@ -763,20 +763,37 @@ function loadPersistedStores(): Map<string, DeviceStore> {
 const deviceStores = loadPersistedStores();
 
 let saveStoresDebounceTimer: NodeJS.Timeout | null = null;
+function flushDeviceStoresSync() {
+  if (saveStoresDebounceTimer) {
+    clearTimeout(saveStoresDebounceTimer);
+    saveStoresDebounceTimer = null;
+  }
+  try {
+    const obj: Record<string, DeviceStore> = {};
+    for (const [k, v] of deviceStores.entries()) {
+      obj[k] = v;
+    }
+    fs.writeFileSync(STORES_FILE, JSON.stringify(obj), 'utf-8');
+  } catch (err) {
+    console.warn('[Storage] Error flushing stores to disk:', err);
+  }
+}
+
 function persistDeviceStores() {
   if (saveStoresDebounceTimer) clearTimeout(saveStoresDebounceTimer);
   saveStoresDebounceTimer = setTimeout(() => {
-    try {
-      const obj: Record<string, DeviceStore> = {};
-      for (const [k, v] of deviceStores.entries()) {
-        obj[k] = v;
-      }
-      fs.writeFileSync(STORES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
-    } catch (err) {
-      console.warn('[Storage] Error persisting stores to disk:', err);
-    }
-  }, 1000);
+    flushDeviceStoresSync();
+  }, 150);
 }
+
+process.on('SIGINT', () => {
+  flushDeviceStoresSync();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  flushDeviceStoresSync();
+  process.exit(0);
+});
 
 function getDeviceId(req: express.Request): string {
   const h = req.headers['x-device-id'];
@@ -2559,6 +2576,7 @@ async function summarizeContext(
       const ctx = store.contexts.find((c) => c.context_id === contextId);
       if (ctx) {
         ctx.summary = summaryText;
+        persistDeviceStores();
       }
     }
     return summaryText;
@@ -2571,6 +2589,10 @@ async function summarizeContext(
 // API Routes
 app.get('/api/chat/state', (req, res) => {
   const store = getDeviceStore(req);
+  const requestedCtxId = typeof req.query.contextId === 'string' ? req.query.contextId.trim() : '';
+  if (requestedCtxId && store.contexts.some((c) => c.context_id === requestedCtxId)) {
+    store.currentContextId = requestedCtxId;
+  }
   const currentCtx = store.contexts.find((c) => c.context_id === store.currentContextId);
   const activeMessages = store.messages.filter((m) => m.context_id === store.currentContextId);
   const lastMsg = activeMessages[activeMessages.length - 1] || store.messages[store.messages.length - 1];
@@ -2604,6 +2626,7 @@ app.get('/api/chat/state', (req, res) => {
     messages: activeMessages,
     allMessagesCount: store.messages.length,
     personas: store.personas,
+    botMemories: store.botMemories,
     nextSpeaker,
     activeRecallTopic: store.activeRecall,
     activeModel: activeModelObj ? activeModelObj.name : store.selectedModelId,
@@ -4142,10 +4165,15 @@ app.get('/api/groq/models', async (req, res) => {
 app.get('/api/chat/context/:id/messages', (req, res) => {
   const store = getDeviceStore(req);
   const contextId = req.params.id;
-  const ctxMessages = store.messages.filter((m) => m.context_id === contextId);
   const ctx = store.contexts.find((c) => c.context_id === contextId);
+  if (ctx) {
+    store.currentContextId = contextId;
+    persistDeviceStores();
+  }
+  const ctxMessages = store.messages.filter((m) => m.context_id === contextId);
   res.json({
     context: ctx,
+    currentContextId: store.currentContextId,
     messages: ctxMessages,
   });
 });
@@ -4154,7 +4182,10 @@ app.get('/api/chat/context/:id/messages', (req, res) => {
 app.post('/api/chat/message', async (req, res) => {
   const store = getDeviceStore(req);
   const clientKeys = extractClientKeys(req);
-  const { text, speaker = 'You', sticker } = req.body;
+  const { text, speaker = 'You', sticker, contextId } = req.body;
+  if (typeof contextId === 'string' && contextId.trim() && store.contexts.some((c) => c.context_id === contextId.trim())) {
+    store.currentContextId = contextId.trim();
+  }
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'Message text is required' });
   }
@@ -4407,7 +4438,10 @@ app.post('/api/chat/turn', async (req, res) => {
     });
   }
 
-  let { personaName } = req.body;
+  let { personaName, contextId } = req.body;
+  if (typeof contextId === 'string' && contextId.trim() && store.contexts.some((c) => c.context_id === contextId.trim())) {
+    store.currentContextId = contextId.trim();
+  }
   const currentCtx = store.contexts.find((c) => c.context_id === store.currentContextId);
   const allowedIds = currentCtx?.allowed_persona_ids;
 
@@ -4932,6 +4966,7 @@ INSTRUCTION:
       recalledTopic: wasRecall,
       pixelTask: currentPixelTask,
       activePoll: currentPoll,
+      botMemories: store.botMemories,
     });
   } catch (err: any) {
     console.error('Turn generation failed:', err);
@@ -5035,8 +5070,14 @@ app.put('/api/chat/context/:id/personas', (req, res) => {
       store.personas.some((p) => p.id === pid || p.name === pid)
     );
   }
+  persistDeviceStores();
 
-  res.json({ success: true, context: ctx, contexts: store.contexts });
+  const enrichedContexts = store.contexts.map((c) => ({
+    ...c,
+    message_count: store.messages.filter((m) => m.context_id === c.context_id).length,
+  }));
+
+  res.json({ success: true, context: ctx, contexts: enrichedContexts });
 });
 
 // Start new topic (/newtopic <label>)
@@ -5075,6 +5116,7 @@ app.post('/api/chat/new-topic', async (req, res) => {
     context_id: newCtxId,
   };
   store.messages.push(switchNotice);
+  persistDeviceStores();
 
   // Asynchronously summarize previous context in background
   const oldCtx = store.contexts.find((c) => c.context_id === oldContextId);
@@ -5168,6 +5210,7 @@ app.put('/api/chat/personas', (req, res) => {
   const { updatedPersonas } = req.body;
   if (Array.isArray(updatedPersonas) && updatedPersonas.length > 0) {
     store.personas = updatedPersonas;
+    persistDeviceStores();
   }
   res.json({ personas: store.personas });
 });
@@ -5181,31 +5224,135 @@ app.post('/api/chat/reset', (req, res) => {
   res.json({ success: true, currentContextId: store.currentContextId, messages: store.messages });
 });
 
-// Client <-> Server state sync endpoint to prevent mobile chat discussion deletion
+// Client <-> Server state sync endpoint to prevent chat & discussion group deletion on refresh
 app.post('/api/chat/sync', (req, res) => {
   const store = getDeviceStore(req);
-  const { messages, contexts, currentContextId } = req.body || {};
+  const { messages, contexts, currentContextId, personas: clientPersonas, botMemories: clientMemories } = req.body || {};
 
-  if (Array.isArray(messages) && messages.length > 0) {
-    const existingMap = new Map<number, ChatMessage>();
-    for (const m of store.messages) {
-      if (typeof m.id === 'number') existingMap.set(m.id, m);
+  // 1. Merge personas (preserve custom/imported personas & edits from client)
+  if (Array.isArray(clientPersonas) && clientPersonas.length > 0) {
+    const personaMap = new Map<string, Persona>();
+    for (const p of store.personas) {
+      personaMap.set(p.id, p);
     }
-    for (const m of messages) {
-      if (typeof m.id === 'number' && !existingMap.has(m.id)) {
-        existingMap.set(m.id, m);
+    for (const cp of clientPersonas) {
+      if (!cp || !cp.id) continue;
+      const existing = personaMap.get(cp.id);
+      if (!existing) {
+        personaMap.set(cp.id, cp);
+      } else if (cp.isCustom) {
+        personaMap.set(cp.id, { ...existing, ...cp });
       }
     }
-    store.messages = Array.from(existingMap.values()).sort((a, b) => a.id - b.id);
-    store.messageAutoId = Math.max(...store.messages.map((m: any) => (typeof m.id === 'number' ? m.id : 0)), store.messageAutoId) + 1;
+    store.personas = Array.from(personaMap.values());
   }
 
-  if (Array.isArray(contexts) && contexts.length > 0) {
-    for (const ctx of contexts) {
-      if (!store.contexts.some((c) => c.context_id === ctx.context_id)) {
-        store.contexts.push(ctx);
+  // 2. Merge botMemories
+  if (clientMemories && typeof clientMemories === 'object') {
+    if (!store.botMemories) store.botMemories = {};
+    for (const [botId, bank] of Object.entries(clientMemories as Record<string, BotMemoryBank>)) {
+      if (!bank || typeof bank !== 'object') continue;
+      if (!store.botMemories[botId]) {
+        store.botMemories[botId] = bank;
+      } else {
+        const srvBank = store.botMemories[botId];
+        if (bank.u?.name && !srvBank.u.name) srvBank.u.name = bank.u.name;
+        if (bank.u?.rapport && (!srvBank.u.rapport || srvBank.u.updatedAt < (bank.u.updatedAt || 0))) {
+          srvBank.u.rapport = bank.u.rapport;
+        }
+        if (Array.isArray(bank.u?.traits) && bank.u.traits.length > 0) {
+          srvBank.u.traits = Array.from(new Set([...srvBank.u.traits, ...bank.u.traits])).slice(0, 5);
+        }
+        if (Array.isArray(bank.e)) {
+          for (const sh of bank.e) {
+            if (sh && typeof sh.s === 'string' && !srvBank.e.some((e) => e.s === sh.s)) {
+              srvBank.e.push(sh);
+            }
+          }
+          srvBank.e = srvBank.e.slice(0, 40);
+        }
       }
     }
+  }
+
+  // 3. Merge discussion groups (contexts) so non-default discussion groups are never lost
+  if (Array.isArray(contexts) && contexts.length > 0) {
+    for (const ctx of contexts) {
+      if (!ctx || !ctx.context_id) continue;
+      const existingIdx = store.contexts.findIndex((c) => c.context_id === ctx.context_id);
+      if (existingIdx === -1) {
+        store.contexts.push({
+          context_id: ctx.context_id,
+          topic_label: ctx.topic_label || 'Discussion',
+          summary: ctx.summary || null,
+          created_at: ctx.created_at || new Date().toISOString(),
+          last_active_at: ctx.last_active_at || new Date().toISOString(),
+          allowed_persona_ids: Array.isArray(ctx.allowed_persona_ids) ? ctx.allowed_persona_ids : undefined,
+        });
+      } else {
+        const srvCtx = store.contexts[existingIdx];
+        if (ctx.topic_label && ctx.topic_label !== 'General Discussion' && srvCtx.topic_label === 'General Discussion') {
+          srvCtx.topic_label = ctx.topic_label;
+        }
+        if (ctx.summary && !srvCtx.summary) {
+          srvCtx.summary = ctx.summary;
+        }
+        if (
+          Array.isArray(ctx.allowed_persona_ids) &&
+          ctx.allowed_persona_ids.length > 0 &&
+          (!Array.isArray(srvCtx.allowed_persona_ids) || srvCtx.allowed_persona_ids.length === 0)
+        ) {
+          srvCtx.allowed_persona_ids = ctx.allowed_persona_ids;
+        }
+      }
+    }
+  }
+
+  // 4. Merge messages across all contexts without cross-context ID collisions
+  if (Array.isArray(messages) && messages.length > 0) {
+    const getMsgKey = (m: ChatMessage) =>
+      `${m.context_id || 'ctx-1'}__${m.id ?? ''}__${m.speaker}__${(m.text || '').slice(0, 32)}`;
+
+    const existingMap = new Map<string, ChatMessage>();
+    for (const m of store.messages) {
+      if (m) existingMap.set(getMsgKey(m), m);
+    }
+
+    for (const m of messages) {
+      if (!m) continue;
+      const key = getMsgKey(m);
+      const existing = existingMap.get(key);
+      if (!existing) {
+        // Clean any placeholder '[CACHED_IN_INDEXEDDB]' if needed
+        const cleanMsg: ChatMessage = { ...m, context_id: m.context_id || 'ctx-1' };
+        if (cleanMsg.visual_graph === '[CACHED_IN_INDEXEDDB]') {
+          delete cleanMsg.visual_graph;
+        }
+        if (cleanMsg.generated_image?.image_url === '[CACHED_IN_INDEXEDDB]') {
+          delete cleanMsg.generated_image;
+        }
+        existingMap.set(key, cleanMsg);
+      } else {
+        if (m.visual_graph && m.visual_graph !== '[CACHED_IN_INDEXEDDB]' && !existing.visual_graph) {
+          existing.visual_graph = m.visual_graph;
+        }
+        if (
+          m.generated_image?.image_url &&
+          m.generated_image.image_url !== '[CACHED_IN_INDEXEDDB]' &&
+          !existing.generated_image?.image_url
+        ) {
+          existing.generated_image = m.generated_image;
+        }
+      }
+    }
+
+    store.messages = Array.from(existingMap.values()).sort((a, b) => {
+      const idA = typeof a.id === 'number' ? a.id : 0;
+      const idB = typeof b.id === 'number' ? b.id : 0;
+      return idA - idB;
+    });
+    store.messageAutoId =
+      Math.max(...store.messages.map((m: any) => (typeof m.id === 'number' ? m.id : 0)), store.messageAutoId) + 1;
   }
 
   if (currentContextId && store.contexts.some((c) => c.context_id === currentContextId)) {
@@ -5213,7 +5360,22 @@ app.post('/api/chat/sync', (req, res) => {
   }
 
   persistDeviceStores();
-  res.json({ success: true, count: store.messages.length });
+
+  const enrichedContexts = store.contexts.map((ctx) => ({
+    ...ctx,
+    message_count: store.messages.filter((m) => m.context_id === ctx.context_id).length,
+  }));
+  const activeMessages = store.messages.filter((m) => m.context_id === store.currentContextId);
+
+  res.json({
+    success: true,
+    count: store.messages.length,
+    currentContextId: store.currentContextId,
+    contexts: enrichedContexts,
+    messages: activeMessages,
+    personas: store.personas,
+    botMemories: store.botMemories,
+  });
 });
 
 // Gracefully handle payload too large or body parsing errors
