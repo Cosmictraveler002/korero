@@ -498,6 +498,9 @@ export default function App() {
 
   // Start fresh chat with selected bots
   const handleStartNewChat = async (topicLabel: string, allowedIds: string[]) => {
+    clearFollowUpTimer();
+    unansweredBotTurnsRef.current = 0;
+    setUnansweredBotTurns(0);
     try {
       const res = await fetch('/api/chat/new', {
         method: 'POST',
@@ -515,7 +518,11 @@ export default function App() {
       setActivePoll(null);
       setActiveDirective(null);
       if (data.nextSpeaker) setNextSpeaker(data.nextSpeaker);
-      showToast(`Started conversation with ${allowedIds.length} bots`);
+      showToast(
+        allowedIds.length === 1
+          ? `Started 1-on-1 chat`
+          : `Started conversation with ${allowedIds.length} bots`
+      );
     } catch (err: any) {
       showToast(err.message || 'Error creating chat');
     }
@@ -523,6 +530,7 @@ export default function App() {
 
   // Update allowed bots for the current active conversation
   const handleUpdateCurrentContextBots = async (allowedIds: string[]) => {
+    clearFollowUpTimer();
     try {
       const res = await fetch(`/api/chat/context/${currentContextId}/personas`, {
         method: 'PUT',
@@ -532,7 +540,11 @@ export default function App() {
       if (!res.ok) throw new Error('Failed to update conversation bots');
       const data = await res.json();
       setContexts(data.contexts);
-      showToast(`Updated conversation bots (${allowedIds.length} active)`);
+      showToast(
+        allowedIds.length === 1
+          ? `Updated to 1-on-1 chat (1 bot active)`
+          : `Updated conversation bots (${allowedIds.length} active)`
+      );
       setShowChangeChatBotsModal(false);
     } catch (err: any) {
       showToast(err.message || 'Error updating conversation bots');
@@ -604,6 +616,9 @@ export default function App() {
 
   // Switch context/topic handler
   const handleSwitchContext = async (contextId: string) => {
+    clearFollowUpTimer();
+    unansweredBotTurnsRef.current = 0;
+    setUnansweredBotTurns(0);
     try {
       // 1. Immediately switch and load local messages to avoid flashing
       setCurrentContextId(contextId);
@@ -866,11 +881,25 @@ export default function App() {
       unansweredBotTurnsRef.current += 1;
       setUnansweredBotTurns(unansweredBotTurnsRef.current);
 
-      // Rule: Until human replies, bot can ask/follow up at most TWICE with a 12s wait period (10-15s)
-      if (unansweredBotTurnsRef.current < 3 && !isPaused) {
-        clearFollowUpTimer();
+      // Check how many bots participate in this conversation
+      const activeCtxObj = contexts.find((c) => c.context_id === currentContextId);
+      const activeBotCount =
+        activeCtxObj?.allowed_persona_ids && activeCtxObj.allowed_persona_ids.length > 0
+          ? activeCtxObj.allowed_persona_ids.length
+          : personas.length;
+      const isSingleBotRoom = activeBotCount <= 1;
+      const isNextSpeakerDifferent = Boolean(
+        data.nextSpeaker &&
+          data.message?.speaker &&
+          data.nextSpeaker.toLowerCase() !== data.message.speaker.toLowerCase()
+      );
+
+      // In a 1-on-1 single-bot chat, stop after 1 reply and wait for the human user's response (never talk to self).
+      // In a multi-bot group chat, allow at most 1 peer bot follow-up before waiting for the human user.
+      clearFollowUpTimer();
+      if (!isSingleBotRoom && unansweredBotTurnsRef.current < 2 && isNextSpeakerDifferent && !isPaused) {
         followUpTimerRef.current = setTimeout(() => {
-          executeTurn();
+          executeTurn(data.nextSpeaker);
         }, 12000);
       }
     } catch (err: any) {
@@ -1533,13 +1562,18 @@ export default function App() {
           <div className="flex items-center gap-1.5 shrink-0">
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                !isPaused && unansweredBotTurns < 3 ? 'bg-emerald-400' : 'bg-amber-400'
+                !isPaused &&
+                unansweredBotTurns < (allowedBotsInThisChat.length <= 1 ? 1 : 2)
+                  ? 'bg-emerald-400'
+                  : 'bg-amber-400'
               }`}
             />
             <span className="text-neutral-300 font-medium">
               {!isPaused
-                ? unansweredBotTurns >= 3
-                  ? 'Waiting for your reply (Asked twice)'
+                ? unansweredBotTurns >= (allowedBotsInThisChat.length <= 1 ? 1 : 2)
+                  ? 'Waiting for your reply'
+                  : allowedBotsInThisChat.length <= 1
+                  ? '1-on-1 Chat · Waiting for your reply'
                   : 'Active · Waiting for reply'
                 : 'Paused'}
             </span>

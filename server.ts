@@ -2066,8 +2066,8 @@ function selectNextSpeaker(
   const personaNames = activePool.map((p) => p.name);
   if (personaNames.length === 0) return activePersonas[0]?.name || 'Rook';
 
-  // 1. Check for explicit tagged / directly addressed personas across ALL activePersonas
-  const taggedPersonas = extractTaggedPersonas(lastMessageText, activePersonas);
+  // 1. Check for explicit tagged / directly addressed personas within the allowed activePool
+  const taggedPersonas = extractTaggedPersonas(lastMessageText, activePool);
   for (const tp of taggedPersonas) {
     if (tp.name.toLowerCase() !== lastSpeaker.toLowerCase()) {
       return tp.name;
@@ -3315,15 +3315,20 @@ app.post('/api/chat/message', async (req, res) => {
     }
   }
 
-  // Extract tagged bots in human message using robust diacritics/direct address matching
+  // Extract tagged bots in human message
   const taggedPersonas = extractTaggedPersonas(cleanText, store.personas);
   const taggedBots = taggedPersonas.map((p) => p.name);
 
-  // Auto-add tagged bots to current context's allowed_persona_ids if constrained
+  // Only auto-add a bot to current context's allowed_persona_ids if the human explicitly used an @mention (@Name)
   const currentCtx = store.contexts.find((c) => c.context_id === store.currentContextId);
-  if (currentCtx && Array.isArray(currentCtx.allowed_persona_ids)) {
+  if (currentCtx && Array.isArray(currentCtx.allowed_persona_ids) && cleanText.includes('@')) {
     for (const p of taggedPersonas) {
-      if (!currentCtx.allowed_persona_ids.includes(p.id) && !currentCtx.allowed_persona_ids.includes(p.name)) {
+      const explicitAt = new RegExp(`@${normalizeString(p.name)}\\b|@${normalizeString(p.id)}\\b`, 'i');
+      if (
+        explicitAt.test(normalizeString(cleanText)) &&
+        !currentCtx.allowed_persona_ids.includes(p.id) &&
+        !currentCtx.allowed_persona_ids.includes(p.name)
+      ) {
         currentCtx.allowed_persona_ids.push(p.id);
       }
     }
@@ -3530,24 +3535,39 @@ app.post('/api/chat/turn', async (req, res) => {
     );
   }
 
-  // Find requested persona across ALL personas in store to allow dynamically calling any bot
-  let persona = store.personas.find(
+  // Find requested persona: prefer activePool so constrained single-bot chats don't accidentally pull in outside bots
+  let persona = activePool.find(
     (p) => p.name.toLowerCase() === personaName.toLowerCase() || p.id.toLowerCase() === personaName.toLowerCase()
   );
 
   if (!persona) {
-    persona = activePool[0] || store.personas[0];
-  } else if (currentCtx && Array.isArray(currentCtx.allowed_persona_ids)) {
-    if (!currentCtx.allowed_persona_ids.includes(persona.id) && !currentCtx.allowed_persona_ids.includes(persona.name)) {
-      currentCtx.allowed_persona_ids.push(persona.id);
+    // Only allow outside persona if explicitly requested via req.body.personaName AND no strict single-bot constraint
+    const globalMatch = store.personas.find(
+      (p) => p.name.toLowerCase() === personaName.toLowerCase() || p.id.toLowerCase() === personaName.toLowerCase()
+    );
+    if (globalMatch && (!Array.isArray(allowedIds) || allowedIds.length === 0)) {
+      persona = globalMatch;
+    } else {
+      persona = activePool[0] || store.personas[0];
     }
   }
 
+  const isSingleBotChat = activePool.length === 1;
   const recentMessagesInContext = activeMessages.slice(-8);
 
-  const otherParticipants = [...activePool.map((p) => p.name), 'You'].filter(
-    (name) => name.toLowerCase() !== persona.name.toLowerCase()
-  );
+  // Find the most recent message sent by the human user (not a bot or System)
+  const lastHumanMsg = [...activeMessages]
+    .reverse()
+    .find(
+      (m) =>
+        m.speaker !== 'System' &&
+        m.speaker.toLowerCase() !== persona.name.toLowerCase() &&
+        !store.personas.some((p) => p.name.toLowerCase() === m.speaker.toLowerCase())
+    );
+
+  const otherBotsInRoom = activePool
+    .map((p) => p.name)
+    .filter((name) => name.toLowerCase() !== persona.name.toLowerCase());
 
   let promptHistory = `Topic: "${currentCtx ? currentCtx.topic_label : 'Discussion'}"\n`;
 
@@ -3561,7 +3581,7 @@ app.post('/api/chat/turn', async (req, res) => {
 
   promptHistory += `\nRecent chat history:\n`;
   if (recentMessagesInContext.length === 0) {
-    promptHistory += `(No messages in this topic yet. Start off the conversation about "${currentCtx?.topic_label}".)\n`;
+    promptHistory += `(No messages in this topic yet. Greet the user and start off the conversation about "${currentCtx?.topic_label}".)\n`;
   } else {
     for (const msg of recentMessagesInContext) {
       promptHistory += `${msg.speaker}: ${msg.text}\n`;
@@ -3607,6 +3627,23 @@ app.post('/api/chat/turn', async (req, res) => {
     pixelTaskInstruction = `\n- 📄 LOCAL TASK.MD ASSIGNMENT: You are fulfilling a temporary task.md requested by ${activePixelTask.requested_by}: "${activePixelTask.description}". Perform any required Python calculations. Once complete, your task will be marked COMPLETED and you will stop auto-responding until requested again.`;
   }
 
+  const chatStructureRules = isSingleBotChat
+    ? `- 1-ON-1 DIRECT CONVERSATION MODE: You are in a direct 1-on-1 conversation exclusively with the human user ("${lastHumanMsg?.speaker || 'You'}"). There are NO other bots or crew members in this chat.
+- Do NOT call on, tag, mention, or defer work to other crew members (such as Rook, Zed, Bramble, Pixel, Moss, Nana Nuance, Gus, Prof. Oop, or Kō). Answer and assist the human user directly yourself.
+- Speak directly to the human user as "you". Never talk to yourself, never reply to your own previous message as if another person wrote it, and wait for the user's response.`
+    : `- ROLE DISCIPLINE: Stay inside your role — don't do another crew member's job. If you notice a gap outside your role, flag it for them by name instead of covering it yourself.
+- You are in a group chat with ${otherBotsInRoom.join(', ')} and the human ("${lastHumanMsg?.speaker || 'You'}"). Treat all participants as peers.
+- Refer to others by name when responding to their points.`;
+
+  const isLastMsgSelf = Boolean(lastMsg && lastMsg.speaker.toLowerCase() === persona.name.toLowerCase());
+  const relevanceInstruction = isLastMsgSelf
+    ? `- CONVERSATIONAL RELEVANCE: The last message in the chat was your own previous message ("${lastMsg.text}"). Do NOT reply to yourself, agree with yourself, or repeat what you just said! Instead, address the human user ("${lastHumanMsg?.speaker || 'You'}") directly${
+        lastHumanMsg ? ` regarding their message ("${lastHumanMsg.text}")` : ` about "${currentCtx?.topic_label || 'the topic'}"`
+      } with a natural follow-up or question for them.`
+    : isSingleBotChat && lastHumanMsg
+    ? `- CONVERSATIONAL RELEVANCE: Directly respond to what the user (${lastHumanMsg.speaker}) said to you: "${lastHumanMsg.text}". Speak directly to them as ${persona.name}, and do not talk to yourself.`
+    : `- CONVERSATIONAL RELEVANCE: Directly respond to what ${lastMsg ? `${lastMsg.speaker} said: "${lastMsg.text}"` : 'the conversation is discussing'}. Stay on topic, speak authentically as ${persona.name}, and contribute distinct value.`;
+
   const promptContents = `${promptHistory}
 ---
 You are ${persona.name}.
@@ -3615,20 +3652,19 @@ ${persona.description}
 Rules:
 ${negativeRulesList}
 - GOLDEN RULE: Absurd in voice, rigorous in facts. Humor lives in the framing, never in an invented source, date, or quote.
-- ROLE DISCIPLINE: Stay inside your role — don't do another crew member's job. If you notice a gap outside your role, flag it for them by name instead of covering it yourself.
-- You are in a group chat with ${otherParticipants.join(', ')} and the human ("You"). Treat all participants as peers.
-- Refer to others by name when responding to their points.
+${chatStructureRules}
+- SINGLE TURN ONLY: Write ONLY ${persona.name}'s single response for this turn. NEVER write dialogue lines for "You:", "User:", "Human:", or any other character, and NEVER continue a multi-turn conversation with yourself in one message.
 - Never prefix your output with your own name.${nsfwInstruction}${pollInstruction}${directiveInstruction}${tagInstruction}${pixelTaskInstruction}
 - WEB SEARCH CAPABILITY: You have live internet search enabled! If any real-world facts, current events, dates, statistics, quotes, technical details, or claims are mentioned in the conversation or directive, output [SEARCH: exact query text] in your draft reply to search the live web for verified facts before giving your final reply.
 - SANDBOX CODE EXECUTION & DATA VISUALIZATION: You have live Python sandbox execution enabled with an automated self-healing refinement loop! If any calculations, data transformations, or visual charts/infographics are requested, output [EXEC: python_code_here] in your draft reply. For Plotly charts, write a standalone Python script and save the figure as 'output.html' using fig.write_html('output.html', include_plotlyjs='cdn'). Do NOT call fig.write_image() as static kaleido export is incompatible. For matplotlib/seaborn, save using plt.savefig('output.png', bbox_inches='tight', dpi=150). Output ONLY executable Python code inside [EXEC: ...]. If an error occurs, the self-healing loop will automatically feed terminal stderr back to you to fix and re-run.
 - 🎨 PARALLEL TEXT-TO-IMAGE GENERATION (NEW FEATURE): You, fellow personas, and the user can generate images and artwork in real-time using Cloudflare Flux 1 Schnell (@cf/black-forest-labs/flux-1-schnell)! If you want to paint, illustrate, visualize a scene, or respond to visual ideas, include \`/image <detailed prompt describing the image>\` in your reply (e.g. \`/image an atmospheric cyberpunk neon owl perched on glowing rain-slicked circuitry, synthwave aesthetic, 8k\`). The system will automatically render your visual art right into the chat stream!
 
-- CONVERSATIONAL RELEVANCE: Directly respond to what ${lastMsg ? `${lastMsg.speaker} said: "${lastMsg.text}"` : 'the conversation is discussing'}. Stay on topic, speak authentically as ${persona.name}, and contribute distinct value.
+${relevanceInstruction}
 
 Examples of how you talk:
 ${styleAnchorsList}
 
-Reply as ${persona.name}. 1-3 sentences max, casual chat style.`;
+Reply as ${persona.name} directly to the user. 1-3 sentences max, casual chat style.`;
 
   try {
     let currentPrompt = promptContents;
@@ -3816,6 +3852,17 @@ INSTRUCTION:
       .replace(/\[CRAWL:\s*[^\]]+\]/gi, '')
       .replace(/\[EXEC:\s*[\s\S]+?\]/gi, '')
       .trim();
+
+    // Strip any hallucinated multi-turn continuation lines where the LLM scripts "You:" / "User:" / "Human:" or another speaker turn
+    const allSpeakerLabels = [
+      'You',
+      'User',
+      'Human',
+      ...store.personas.map((p) => p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    ];
+    const continuationRegex = new RegExp(`\\n\\s*(?:${allSpeakerLabels.join('|')})\\s*:\\s*[\\s\\S]*$`, 'i');
+    replyText = replyText.replace(continuationRegex, '').trim();
+
     if (!replyText) replyText = '...';
 
     // Parse any /image or /imagine command in persona generated reply
