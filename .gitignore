@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Production and build outputs
+dist/
+dist-ssr/
+build/
+server.js
+*.local
+
+# Environment variables & secrets (Never commit secrets or credentials)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Logs & debugging
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime data & temporary caches
+.tmp/
+tmp/
+temp/
+*.tsbuildinfo
+.eslintcache
+
+# OS & Editor generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Testing & coverage
+coverage/
+.nyc_output/

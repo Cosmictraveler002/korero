@@ -1,0 +1,486 @@
+import React, { useState } from 'react';
+import { X, Check, Brain } from 'lucide-react';
+import { Persona, ThoughtfulnessLevel, ModelOption } from '../types';
+import { PersonaAvatar } from './PersonaAvatar';
+
+interface CreatePersonaModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (persona: Partial<Persona>) => Promise<void>;
+  globalNsfwEnabled: boolean;
+  availableModels?: ModelOption[];
+}
+
+const PRESET_AVATARS = [
+  { name: 'Tactical Analyst', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Researcher', url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Philosopher', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Strategist', url: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Technologist', url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Engineer', url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Scholar', url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Creative Writer', url: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Curator', url: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=200&auto=format&fit=crop&q=80' },
+  { name: 'Critic', url: 'https://images.unsplash.com/photo-1501196354995-cbb51c65aaea?w=200&auto=format&fit=crop&q=80' },
+];
+
+const PRESET_COLORS = [
+  '#ef4444',
+  '#f97316',
+  '#f59e0b',
+  '#10b981',
+  '#06b6d4',
+  '#3b82f6',
+  '#8b5cf6',
+  '#ec4899',
+  '#71717a',
+];
+
+export const CreatePersonaModal: React.FC<CreatePersonaModalProps> = ({
+  isOpen,
+  onClose,
+  onSave,
+  globalNsfwEnabled,
+  availableModels,
+}) => {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [avatarUrl, setAvatarUrl] = useState(PRESET_AVATARS[0].url);
+  const [customUrlInput, setCustomUrlInput] = useState('');
+  const [badgeColor, setBadgeColor] = useState('#3b82f6');
+  const [allowNsfw, setAllowNsfw] = useState(false);
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [intellect, setIntellect] = useState<number>(6);
+  const [thoughtfulness, setThoughtfulness] = useState<ThoughtfulnessLevel>('balanced');
+  const [pacingDelaySeconds, setPacingDelaySeconds] = useState<number>(1.0);
+
+  const [constraints, setConstraints] = useState<string[]>([
+    'Do NOT use more than 2-3 sentences per message.',
+    'Do NOT apologize or give generic AI disclaimers.',
+  ]);
+  const [newConstraint, setNewConstraint] = useState('');
+
+  const [styleAnchors, setStyleAnchors] = useState<string[]>([
+    'let us get straight to the point.',
+  ]);
+  const [newStyleAnchor, setNewStyleAnchor] = useState('');
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!isOpen) return null;
+
+  const handleAddConstraint = () => {
+    if (newConstraint.trim()) {
+      setConstraints((prev) => [...prev, newConstraint.trim()]);
+      setNewConstraint('');
+    }
+  };
+
+  const handleRemoveConstraint = (index: number) => {
+    setConstraints((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleAddStyleAnchor = () => {
+    if (newStyleAnchor.trim()) {
+      setStyleAnchors((prev) => [...prev, newStyleAnchor.trim()]);
+      setNewStyleAnchor('');
+    }
+  };
+
+  const handleRemoveStyleAnchor = (index: number) => {
+    setStyleAnchors((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError('Please provide a name for the bot.');
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setError(null);
+      await onSave({
+        name: name.trim(),
+        description: description.trim() || `${name} is an active participant in Kōrero group chat.`,
+        avatarUrl: customUrlInput.trim() || avatarUrl,
+        badgeColor,
+        allowNsfw,
+        negative_constraints: constraints,
+        style_anchor: styleAnchors,
+        selectedModelId: selectedModelId || undefined,
+        intellect,
+        thoughtfulness,
+        pacingDelaySeconds,
+      });
+      onClose();
+      // Reset
+      setName('');
+      setDescription('');
+      setCustomUrlInput('');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create bot persona');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const currentPreviewUrl = customUrlInput.trim() || avatarUrl;
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150">
+      <div
+        className="bg-neutral-900 border border-neutral-800 rounded-lg shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between shrink-0 bg-neutral-950">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Create New Bot Persona</h2>
+            <p className="text-[11px] text-neutral-400 mt-0.5">
+              Design a unique voice, portrait, and role for group discussions.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-neutral-400 hover:text-white p-1 rounded hover:bg-neutral-800 transition"
+            aria-label="Close"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Form Body */}
+        <form onSubmit={handleSubmit} className="p-4 overflow-y-auto space-y-4 text-xs">
+          {error && (
+            <div className="p-2.5 rounded bg-neutral-950 border border-red-900/80 text-red-300 text-xs">
+              {error}
+            </div>
+          )}
+
+          {/* Live Avatar Preview & Name Row */}
+          <div className="flex items-start gap-4 p-3 bg-neutral-950 rounded border border-neutral-800">
+            <div className="flex flex-col items-center gap-1 shrink-0">
+              <PersonaAvatar
+                name={name || 'New Bot'}
+                avatarUrl={currentPreviewUrl}
+                avatarLetter={name.charAt(0) || 'N'}
+                badgeColor={badgeColor}
+                size="lg"
+                allowNsfw={allowNsfw}
+              />
+              <span className="text-[10px] text-neutral-500">Preview</span>
+            </div>
+
+            <div className="flex-1 space-y-2.5 min-w-0">
+              <div>
+                <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+                  Bot Name <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Apex, Nova, Solon"
+                  className="w-full bg-neutral-900 border border-neutral-750 rounded px-2.5 py-1.5 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
+                  required
+                  autoFocus
+                />
+              </div>
+
+              {/* Accent Color Picker */}
+              <div>
+                <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+                  Accent Color
+                </label>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {PRESET_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setBadgeColor(c)}
+                      className={`w-5 h-5 rounded-full transition flex items-center justify-center ${
+                        badgeColor === c ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950' : 'opacity-80 hover:opacity-100'
+                      }`}
+                      style={{ backgroundColor: c }}
+                      aria-label={`Color ${c}`}
+                    >
+                      {badgeColor === c && <Check size={10} className="text-white" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Select Profile Picture */}
+          <div>
+            <label className="block text-[11px] font-medium text-neutral-300 mb-1.5">
+              Select Profile Picture
+            </label>
+            <div className="grid grid-cols-5 sm:grid-cols-10 gap-1.5 mb-2">
+              {PRESET_AVATARS.map((preset) => (
+                <button
+                  key={preset.url}
+                  type="button"
+                  onClick={() => {
+                    setAvatarUrl(preset.url);
+                    setCustomUrlInput(preset.url);
+                  }}
+                  className={`relative rounded-full aspect-square overflow-hidden border transition ${
+                    currentPreviewUrl === preset.url
+                      ? 'border-white ring-1 ring-white'
+                      : 'border-neutral-800 hover:border-neutral-600 opacity-70 hover:opacity-100'
+                  }`}
+                  title={preset.name}
+                >
+                  <img src={preset.url} alt={preset.name} className="w-full h-full object-cover" />
+                </button>
+              ))}
+            </div>
+
+            {/* Custom URL Input */}
+            <input
+              type="url"
+              value={customUrlInput}
+              onChange={(e) => {
+                setCustomUrlInput(e.target.value);
+                setAvatarUrl(e.target.value);
+              }}
+              placeholder="Or enter direct image URL (https://...)"
+              className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
+            />
+          </div>
+
+          {/* Role Description */}
+          <div>
+            <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+              Personality & Role Description
+            </label>
+            <textarea
+              rows={2}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="e.g. Sarcastic technologist with deep history knowledge..."
+              className="w-full bg-neutral-950 border border-neutral-800 rounded p-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
+            />
+          </div>
+
+          {/* Dedicated AI Model Selector */}
+          <div className="p-3 rounded border border-neutral-800 bg-neutral-950 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-xs font-semibold text-white">
+                Dedicated AI Model
+              </label>
+              <span className="text-[10px] text-cyan-400 font-mono font-medium truncate max-w-[200px]">
+                {selectedModelId || 'Room Default'}
+              </span>
+            </div>
+            <p className="text-[11px] text-neutral-400 leading-snug">
+              Assign a dedicated model or leave default to inherit room settings.
+            </p>
+            <select
+              value={selectedModelId}
+              onChange={(e) => setSelectedModelId(e.target.value)}
+              className="w-full bg-neutral-900 border border-neutral-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-neutral-600 cursor-pointer"
+            >
+              <option value="">(Use Active Room Default Model)</option>
+              {availableModels && availableModels.length > 0 ? (
+                availableModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="auto/smart-routing">⚡ Auto-Switch / Smart Route (Best Available)</option>
+                  <option value="@cf/zai-org/glm-4.7-flash">GLM: 4.7 Flash (Cloudflare Workers AI)</option>
+                  <option value="@cf/qwen/qwen3-30b-a3b-fp8">Qwen: Qwen3 30B A3B FP8 (Cloudflare Workers AI)</option>
+                  <option value="llama-3.3-70b-versatile">Meta: Llama 3.3 70B Versatile (Groq LPU)</option>
+                  <option value="llama-3.1-8b-instant">Meta: Llama 3.1 8B Instant (Groq LPU)</option>
+                  <option value="openai/gpt-oss-120b">OpenAI: GPT-OSS 120B (Groq LPU)</option>
+                  <option value="openai/gpt-oss-20b">OpenAI: GPT-OSS 20B (Groq LPU)</option>
+                  <option value="deepseek-r1-distill-llama-70b">DeepSeek: R1 Distill Llama 70B (Groq LPU)</option>
+                  <option value="qwen-2.5-32b">Qwen: Qwen 2.5 32B (Groq LPU)</option>
+                  <option value="cognitivecomputations/dolphin-mistral-24b-venice-edition">Dolphin: Mistral 24B Venice Edition (OpenRouter)</option>
+                  <option value="openrouter/free">OpenRouter: Dynamic Free Auto-Route (OpenRouter)</option>
+                  <option value="cohere/north-mini-code:free">Cohere: North Mini Code (OpenRouter SDK)</option>
+                  <option value="meta-llama/llama-3.3-70b-instruct">Meta: Llama 3.3 70B Instruct (OpenRouter)</option>
+                  <option value="meta/llama-3.2-11b-vision-instruct">Meta: Llama 3.2 11B (NVIDIA NIM)</option>
+                  <option value="meta/llama-3.2-90b-vision-instruct">Meta: Llama 3.2 90B (NVIDIA NIM)</option>
+                </>
+              )}
+            </select>
+          </div>
+
+          {/* Intellect & Thoughtful Response Pacing */}
+          <div className="p-3 rounded border border-neutral-800 bg-neutral-950 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <Brain size={14} className="text-cyan-400" />
+                <span className="font-semibold text-xs text-white">Intellect & Response Pacing</span>
+              </div>
+              <span className="text-[10px] text-cyan-400 font-mono font-medium px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/80">
+                +{pacingDelaySeconds}s thoughtful pause
+              </span>
+            </div>
+            <p className="text-[11px] text-neutral-400 leading-snug">
+              Bots with higher intellect pause 2–3s before speaking, preventing rapid-fire scripts.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-0.5">
+              {[
+                { key: 'quick', label: 'Quick', delay: 0, desc: 'Instant (0s)' },
+                { key: 'balanced', label: 'Balanced', delay: 1.0, desc: 'Natural (+1s)' },
+                { key: 'thoughtful', label: 'Thoughtful', delay: 2.2, desc: 'Analytical (+2.2s)' },
+                { key: 'scholarly', label: 'Scholarly', delay: 3.0, desc: 'Deep research (+3s)' },
+              ].map((tier) => (
+                <button
+                  key={tier.key}
+                  type="button"
+                  onClick={() => {
+                    setThoughtfulness(tier.key as ThoughtfulnessLevel);
+                    setPacingDelaySeconds(tier.delay);
+                    setIntellect(tier.key === 'scholarly' ? 9 : tier.key === 'thoughtful' ? 8 : tier.key === 'balanced' ? 6 : 4);
+                  }}
+                  className={`p-2 rounded-lg text-left border transition cursor-pointer ${
+                    thoughtfulness === tier.key
+                      ? 'bg-neutral-800 border-white text-white shadow-xs ring-1 ring-white/20'
+                      : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200 hover:border-neutral-700'
+                  }`}
+                >
+                  <div className="font-bold text-xs">{tier.label}</div>
+                  <div className="text-[10px] text-neutral-400 mt-0.5">{tier.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 18+ NSFW Clearance */}
+          <div className="p-2.5 rounded border border-neutral-800 bg-neutral-950 flex items-center justify-between gap-3">
+            <div>
+              <span className="font-medium text-xs text-white">18+ NSFW Clearance</span>
+              <p className="text-[11px] text-neutral-400 mt-0.5">
+                Allow this bot to engage in uncensored candid discourse when NSFW mode is on.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAllowNsfw(!allowNsfw)}
+              className={`w-9 h-5 rounded-full transition-colors relative p-0.5 shrink-0 ${
+                allowNsfw ? 'bg-rose-600' : 'bg-neutral-800'
+              }`}
+            >
+              <div
+                className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                  allowNsfw ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Negative Constraints (Rules) */}
+          <div>
+            <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+              Negative Constraints (What they must NOT do)
+            </label>
+            <div className="space-y-1 mb-2 max-h-24 overflow-y-auto pr-1">
+              {constraints.map((rule, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between gap-2 p-1.5 bg-neutral-950 rounded border border-neutral-800 text-[11px] text-neutral-300"
+                >
+                  <span className="truncate">· {rule}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveConstraint(idx)}
+                    className="text-neutral-500 hover:text-white shrink-0 text-[10px]"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={newConstraint}
+                onChange={(e) => setNewConstraint(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddConstraint())}
+                placeholder="Add rule (e.g. Do NOT use bullet points)"
+                className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
+              />
+              <button
+                type="button"
+                onClick={handleAddConstraint}
+                className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-xs"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
+          {/* Style Anchors */}
+          <div>
+            <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+              Style Anchors (Sample quotes)
+            </label>
+            <div className="space-y-1 mb-2 max-h-24 overflow-y-auto pr-1">
+              {styleAnchors.map((anchor, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between gap-2 p-1.5 bg-neutral-950 rounded border border-neutral-800 text-[11px] text-neutral-300 italic"
+                >
+                  <span className="truncate">"{anchor}"</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveStyleAnchor(idx)}
+                    className="text-neutral-500 hover:text-white shrink-0 text-[10px] not-italic"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={newStyleAnchor}
+                onChange={(e) => setNewStyleAnchor(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddStyleAnchor())}
+                placeholder='e.g. "let us be honest here."'
+                className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-600"
+              />
+              <button
+                type="button"
+                onClick={handleAddStyleAnchor}
+                className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-xs"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="pt-2 border-t border-neutral-800 flex items-center justify-end gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-1.5 text-xs text-neutral-400 hover:text-white rounded hover:bg-neutral-800 transition"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="px-4 py-1.5 text-xs font-medium bg-white hover:bg-neutral-200 text-black rounded transition disabled:opacity-50"
+            >
+              {isSubmitting ? 'Creating...' : 'Create Persona'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};

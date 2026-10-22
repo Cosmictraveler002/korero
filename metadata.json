@@ -1,0 +1,7 @@
+{
+  "name": "Kōrero",
+  "description": "Multi-Persona AI Chatroom with persistent memory, dynamic personas, and multi-provider intelligence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

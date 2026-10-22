@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>Kōrero</title>
+    <meta name="description" content="Multi-Persona AI Chatroom with persistent memory, dynamic personas, and multi-provider intelligence." />
+    
+    <!-- PWA & Mobile Meta Tags -->
+    <meta name="theme-color" content="#000000" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Kōrero" />
+    
+    <!-- Favicons and Touch Icons -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    
+    <!-- OpenGraph & Twitter -->
+    <meta property="og:title" content="Kōrero" />
+    <meta property="og:description" content="Multi-Persona AI Chatroom with persistent memory, dynamic personas, and multi-provider intelligence." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/pwa-512x512.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Kōrero" />
+    <meta name="twitter:description" content="Multi-Persona AI Chatroom with persistent memory, dynamic personas, and multi-provider intelligence." />
+    <meta name="twitter:image" content="/pwa-512x512.png" />
+
+    <script>
+      // Prevent TypeError in iframe / sandboxed environments when window.fetch is assigned
+      (function() {
+        try {
+          var origFetch = window.fetch;
+          Object.defineProperty(window, 'fetch', {
+            get: function() { return origFetch; },
+            set: function(fn) { origFetch = fn; },
+            configurable: true,
+            enumerable: true
+          });
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-black text-neutral-100 overflow-x-hidden antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

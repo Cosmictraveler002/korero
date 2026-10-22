@@ -1,0 +1,184 @@
+{
+  "cacheVersion": 2,
+  "lastFetchedAt": 1792660347999,
+  "expiresAt": 1793265147999,
+  "models": [
+    {
+      "id": "openrouter/free",
+      "name": "OpenRouter: Dynamic Free Auto-Route (Free)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Auto-Free Router",
+      "description": "Official OpenRouter dynamic meta-router that automatically routes to the fastest online free model on the network."
+    },
+    {
+      "id": "dots-studio/dots-3-note-preview:free",
+      "name": "Dots Studio: Dots3-Note Preview (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · AtlasCloud",
+      "description": "Dots3-Note Preview is an open-weight mixture-of-experts model from Dots Studio, with 16B active parameters out of 280B total. It is the... (512k context)"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning:free",
+      "name": "NVIDIA: Nemotron 3.5 Lightning (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Nvidia",
+      "description": "NVIDIA Nemotron 3.5 Lightning is an open mixture-of-experts model from NVIDIA, with 3B active parameters out of 30B total. It is suited... (1000k context)"
+    },
+    {
+      "id": "cohere/north-mini-code:free",
+      "name": "Cohere: North Mini Code (Free / Pixel Default)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Pixel Code",
+      "description": "Dedicated code generation & chat model for Pixel data calculations and visualization via OpenRouter."
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "name": "Google: Gemma 4 26B A4B (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Google AI Studio",
+      "description": "Gemma 4 26B A4B IT is an instruction-tuned Mixture-of-Experts (MoE) model from Google DeepMind. Despite 25.2B total parameters, only 3.... (262k context)"
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "name": "Google: Gemma 4 31B (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Google AI Studio",
+      "description": "Gemma 4 31B Instruct is Google DeepMind's 30.7B dense multimodal model supporting text and image input with text output. Features a 256... (262k context)"
+    },
+    {
+      "id": "recursive/flint-v1.0:free",
+      "name": "Recursive: Flint (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Live Reasoning · Recursive",
+      "description": "Flint is an open-weight mixture-of-experts model from Recursive, with about 2.5B active parameters out of 40B total, built by Recursive... (262k context)"
+    },
+    {
+      "id": "minimax/minimax-m3.1-flash:free",
+      "name": "MiniMax: MiniMax M3.1 Flash (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Live Reasoning · Minimax",
+      "description": "MiniMax-M3.1-Flash is a multimodal model from MiniMax. Compared with M3, it delivers significant improvements across multiple benchmark... (1000k context)"
+    },
+    {
+      "id": "thinkingmachines/inkling-small:free",
+      "name": "Thinking Machines: Inkling Small (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Thinking Machines",
+      "description": "Inkling Small is an open-weight multimodal mixture-of-experts model from Thinking Machines Lab, with 12B active parameters out of 276B... (1049k context)"
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "name": "Poolside: Laguna S 2.1 (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Poolside",
+      "description": "Laguna S 2.1 is the latest coding agent model from Poolside. Laguna S 2.1 is a 118B total parameter model with 8B active parameters, sc... (262k context)"
+    },
+    {
+      "id": "thinkingmachines/inkling:free",
+      "name": "Thinking Machines: Inkling (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Thinking Machines",
+      "description": "Inkling is an open-weight multimodal mixture-of-experts model from Thinking Machines Lab, with 41B active parameters out of 975B total.... (1049k context)"
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "name": "Poolside: Laguna XS 2.1 (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Poolside",
+      "description": "Laguna XS 2.1 is the latest coding agent model in the 33B-A3B category from Poolside and a step forward from their Laguna XS.2 model (r... (262k context)"
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "name": "NVIDIA: Nemotron 3 Ultra (Free / OpenRouter)",
+      "provider": "openrouter",
+      "tag": "Verified Live · Nvidia",
+      "description": "NVIDIA Nemotron 3 Ultra is an open frontier-reasoning and orchestration model from NVIDIA, with 55B active parameters out of 550B total... (1000k context)"
+    }
+  ],
+  "modelMeta": {
+    "dots-studio/dots-3-note-preview:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": false,
+      "supportedEfforts": []
+    },
+    "nvidia/nemotron-3.5-lightning:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": false,
+      "supportedEfforts": []
+    },
+    "cohere/north-mini-code:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": false,
+      "supportedEfforts": []
+    },
+    "google/gemma-4-26b-a4b-it:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": false,
+      "supportedEfforts": []
+    },
+    "google/gemma-4-31b-it:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": false,
+      "supportedEfforts": []
+    },
+    "recursive/flint-v1.0:free": {
+      "mandatoryReasoning": true,
+      "defaultReasoning": true,
+      "supportedEfforts": []
+    },
+    "minimax/minimax-m3.1-flash:free": {
+      "mandatoryReasoning": true,
+      "defaultReasoning": true,
+      "supportedEfforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "thinkingmachines/inkling-small:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": true,
+      "supportedEfforts": [
+        "max",
+        "high",
+        "medium",
+        "low",
+        "minimal",
+        "none"
+      ]
+    },
+    "poolside/laguna-s-2.1:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": true,
+      "supportedEfforts": []
+    },
+    "thinkingmachines/inkling:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": true,
+      "supportedEfforts": [
+        "max",
+        "high",
+        "medium",
+        "low",
+        "minimal",
+        "none"
+      ]
+    },
+    "poolside/laguna-xs-2.1:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": true,
+      "supportedEfforts": []
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b:free": {
+      "mandatoryReasoning": false,
+      "defaultReasoning": true,
+      "supportedEfforts": [
+        "high",
+        "medium",
+        "none"
+      ]
+    }
+  }
+}
