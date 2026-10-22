@@ -8,7 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 import Groq from 'groq-sdk';
 import { OpenRouter } from '@openrouter/sdk';
 import { OpenAI } from 'openai';
-import { ChatMessage, ChatContext, Persona, Poll, EvidenceCard, ResearchSession, ResearchReport, PixelTask, GeneratedImageAttachment, ImageQuotaInfo } from './src/types';
+import { ChatMessage, ChatContext, Persona, Poll, EvidenceCard, ResearchSession, ResearchReport, PixelTask, GeneratedImageAttachment, ImageQuotaInfo, BotMemoryBank, BotMemoryShard } from './src/types';
 import {
   fetch_web_results,
   fetch_full_page,
@@ -404,6 +404,334 @@ interface DeviceStore {
   evidenceCards: Record<string, EvidenceCard[]>;
   pixelTasks: Record<string, PixelTask | null>;
   imageQuota?: ImageQuotaState;
+  botMemories: Record<string, BotMemoryBank>;
+}
+
+const DEFAULT_BOT_PEER_STANCES: Record<string, Record<string, string>> = {
+  pixel: {
+    gus_gibbous: 'Skeptical of Gus unverified leaps; always asks him for sample size n.',
+    bramble: 'Relies on Bramble primary source dates before running regressions.',
+  },
+  bramble: {
+    zed: 'Checks Zed fast web snippets against original archival dates.',
+    moss: 'Respects Moss strict citation verification gate.',
+  },
+  rook: {
+    prof_oop: 'Cuts through Prof. Oop theatrical devil-advocate tangents to get to the point.',
+    koa: 'Finds Koa endless enthusiasm loud, but secretly tolerates it.',
+  },
+  mira: {
+    tui: 'Listens to Tui late-night gossip while sipping tea, then asks for a source.',
+  },
+};
+
+const DEFAULT_BOT_RAPPORT: Record<string, string> = {
+  pixel: 'analytical collaborator, values clean data and exact sample sizes',
+  bramble: 'patient archival guide, appreciates curiosity about primary sources',
+  rook: 'direct pragmatic sparring partner, skips small talk for real solutions',
+  zed: 'high-speed web scout, eager to hunt down live receipts for you',
+  moss: 'quiet verification gatekeeper, respects factual precision',
+  nana_nuance: 'warm mentor, looks out for real-world context and human nuance',
+  gus_gibbous: 'enthusiastic co-conspirator in pattern-hunting and wild hypotheses',
+  prof_oop: 'spirited intellectual challenger who tests ideas for sport',
+  ko: 'warm host and moderator keeping the big picture clear',
+  mira: 'calm late-night confidant over warm tea',
+  tui: 'high-energy bestie ready for hot takes and updates',
+  hana: 'supportive hype friend cheering on your projects',
+  manu: 'witty, playfully smug friend who respects sharp banter',
+  ari: 'low-key, chill companion who keeps things simple',
+  koa: 'excited, loyal friend who is always happy you are here',
+};
+
+const MEMORY_STOPWORDS = new Set([
+  'the', 'and', 'for', 'that', 'this', 'with', 'you', 'your', 'are', 'was', 'were',
+  'have', 'has', 'had', 'not', 'but', 'what', 'when', 'where', 'who', 'why', 'how',
+  'from', 'they', 'them', 'their', 'about', 'just', 'like', 'some', 'more', 'very',
+  'can', 'will', 'would', 'could', 'should', 'into', 'than', 'then', 'also', 'only',
+  'its', 'let', 'lets', 'hey', 'yes', 'yeah', 'okay', 'well', 'now', 'here', 'there',
+]);
+
+function tokenizeForMemory(text: string): string[] {
+  if (!text) return [];
+  const raw = text
+    .toLowerCase()
+    .replace(/[^a-z0-9_\-\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !MEMORY_STOPWORDS.has(w));
+  return Array.from(new Set(raw));
+}
+
+function ensureBotMemoryBank(store: DeviceStore, persona: Persona): BotMemoryBank {
+  if (!store.botMemories) {
+    store.botMemories = {};
+  }
+  const key = persona.id;
+  if (!store.botMemories[key]) {
+    store.botMemories[key] = {
+      botId: key,
+      u: {
+        traits: [],
+        rapport: DEFAULT_BOT_RAPPORT[key] || `collaborative conversational partner as ${persona.name}`,
+        updatedAt: Math.floor(Date.now() / 1000),
+      },
+      e: [],
+      p: DEFAULT_BOT_PEER_STANCES[key] ? { ...DEFAULT_BOT_PEER_STANCES[key] } : {},
+    };
+  }
+  return store.botMemories[key];
+}
+
+function upsertBotMemoryShard(
+  bank: BotMemoryBank,
+  summary: string,
+  tags: string[],
+  weight: number,
+  contextId: string
+): BotMemoryShard | null {
+  const cleanSummary = summary.replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!cleanSummary || cleanSummary.length < 4) return null;
+
+  const autoTags = tokenizeForMemory(cleanSummary).slice(0, 5);
+  const mergedTags = Array.from(
+    new Set(
+      [...tags.map((t) => t.toLowerCase().trim()).filter(Boolean), ...autoTags].slice(0, 6)
+    )
+  );
+  const clampedWeight = Math.max(1, Math.min(5, Math.round(weight || 3)));
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // Deduplication check: if an existing shard shares >= 60% tags or >= 70% token overlap, update in-place
+  const newSummaryTokens = new Set(tokenizeForMemory(cleanSummary));
+  for (const existing of bank.e) {
+    const existingTagSet = new Set(existing.k);
+    const sharedTags = mergedTags.filter((t) => existingTagSet.has(t)).length;
+    const tagRatio =
+      mergedTags.length > 0 && existing.k.length > 0
+        ? sharedTags / Math.min(mergedTags.length, existing.k.length)
+        : 0;
+
+    const existingTokens = tokenizeForMemory(existing.s);
+    const sharedTokens = existingTokens.filter((t) => newSummaryTokens.has(t)).length;
+    const tokenRatio =
+      existingTokens.length > 0 && newSummaryTokens.size > 0
+        ? sharedTokens / Math.min(existingTokens.length, newSummaryTokens.size)
+        : 0;
+
+    if (tagRatio >= 0.65 || tokenRatio >= 0.7) {
+      existing.s = cleanSummary;
+      existing.k = Array.from(new Set([...existing.k, ...mergedTags])).slice(0, 6);
+      existing.w = Math.max(existing.w, clampedWeight);
+      existing.t = nowSec;
+      existing.c = contextId;
+      return existing;
+    }
+  }
+
+  const nextId = `m${Date.now().toString(36).slice(-4)}`;
+  const shard: BotMemoryShard = {
+    id: nextId,
+    s: cleanSummary,
+    k: mergedTags,
+    c: contextId,
+    w: clampedWeight,
+    t: nowSec,
+  };
+  bank.e.push(shard);
+
+  // Ring-buffer eviction: Max 40 shards per bot (~4 KB max on disk)
+  if (bank.e.length > 40) {
+    bank.e.sort((a, b) => {
+      const ageHoursA = Math.max(0, (nowSec - a.t) / 3600);
+      const ageHoursB = Math.max(0, (nowSec - b.t) / 3600);
+      const recencyA = Math.max(0, 3 - Math.log10(ageHoursA + 1));
+      const recencyB = Math.max(0, 3 - Math.log10(ageHoursB + 1));
+      const scoreA = a.w * 2 + recencyA;
+      const scoreB = b.w * 2 + recencyB;
+      return scoreB - scoreA;
+    });
+    bank.e = bank.e.slice(0, 40);
+  }
+
+  return shard;
+}
+
+function retrieveBotMemoryBlock(
+  store: DeviceStore,
+  persona: Persona,
+  activePool: Persona[],
+  recentMessages: ChatMessage[],
+  lastHumanMsg?: ChatMessage,
+  currentCtx?: ChatContext
+): { microYamlBlock: string; recalledShards: BotMemoryShard[]; approxTokens: number } {
+  const bank = ensureBotMemoryBank(store, persona);
+  const isSingleBotChat = activePool.length === 1;
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 1. Build weighted query token map from current turn context
+  const queryWeights = new Map<string, number>();
+  const addWeightedTokens = (text: string | undefined, mult: number) => {
+    for (const tok of tokenizeForMemory(text || '')) {
+      queryWeights.set(tok, (queryWeights.get(tok) || 0) + mult);
+    }
+  };
+
+  addWeightedTokens(lastHumanMsg?.text, 3);
+  addWeightedTokens(currentCtx?.topic_label, 2);
+  const lastMsg = recentMessages[recentMessages.length - 1];
+  if (lastMsg && lastMsg.id !== lastHumanMsg?.id) {
+    addWeightedTokens(lastMsg.text, 1);
+  }
+
+  // 2. Score episodic shards in O(N) (< 0.2ms for N <= 40)
+  const scored = bank.e.map((shard) => {
+    let tagOverlap = 0;
+    for (const tag of shard.k) {
+      if (queryWeights.has(tag)) {
+        tagOverlap += queryWeights.get(tag)!;
+      }
+    }
+    const shardTokens = tokenizeForMemory(shard.s);
+    let textMatch = 0;
+    for (const tok of shardTokens) {
+      if (queryWeights.has(tok)) {
+        textMatch += 1;
+      }
+    }
+    const ageHours = Math.max(0, (nowSec - shard.t) / 3600);
+    const recencyBoost = ageHours <= 2 ? 2.5 : ageHours <= 24 ? 1.5 : ageHours <= 168 ? 0.75 : 0.2;
+    const score = tagOverlap * 4 + textMatch * 2 + shard.w * 1.5 + recencyBoost;
+    return { shard, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  // Pick Top K=3 shards
+  const topShards = scored.slice(0, 3).map((item) => item.shard);
+
+  // 3. Assemble Micro-YAML Memory Block (Hard Cap <= 600 chars / ~150 tokens)
+  const lines: string[] = [`[Memory (${persona.name})]:`];
+  const userNamePart = bank.u.name ? bank.u.name : 'User';
+  const traitsPart = bank.u.traits.length > 0 ? ` | traits: ${bank.u.traits.slice(0, 5).join(', ')}` : '';
+  lines.push(`user: ${userNamePart}${traitsPart}`);
+  if (bank.u.rapport) {
+    lines.push(`rapport: ${bank.u.rapport.slice(0, 95)}`);
+  }
+
+  if (topShards.length > 0) {
+    lines.push('recalled:');
+    for (const s of topShards) {
+      lines.push(`- ${s.s}`);
+    }
+  }
+
+  // Only include peer stances in multi-bot group chats (completely omitted in 1-on-1 chats)
+  if (!isSingleBotChat && bank.p && Object.keys(bank.p).length > 0) {
+    const activePeerEntries = Object.entries(bank.p).filter(([peerId]) =>
+      activePool.some((p) => p.id === peerId || p.name.toLowerCase() === peerId.toLowerCase())
+    );
+    if (activePeerEntries.length > 0) {
+      lines.push(
+        `peers: ${activePeerEntries
+          .slice(0, 2)
+          .map(([k, v]) => `${k}(${v.slice(0, 60)})`)
+          .join('; ')}`
+      );
+    }
+  }
+
+  let microYamlBlock = lines.join('\n');
+  if (microYamlBlock.length > 600) {
+    microYamlBlock = microYamlBlock.slice(0, 597) + '...';
+  }
+  const approxTokens = Math.ceil(microYamlBlock.length / 4);
+
+  return {
+    microYamlBlock,
+    recalledShards: topShards,
+    approxTokens,
+  };
+}
+
+function extractAndSaveBotMemory(
+  store: DeviceStore,
+  persona: Persona,
+  rawReplyText: string,
+  lastHumanMsg?: ChatMessage,
+  contextId = 'ctx-1'
+): string {
+  const bank = ensureBotMemoryBank(store, persona);
+  let cleaned = rawReplyText;
+  let memoryModified = false;
+
+  // 1. Parse inline [MEM: fact | tags: t1, t2 | w: 1-5] markers emitted by the LLM
+  const memRegex = /\[MEM:\s*([^|\]]+?)(?:\s*\|\s*tags:\s*([^|\]]+?))?(?:\s*\|\s*w:\s*([1-5]))?\s*\]/gi;
+  let match: RegExpExecArray | null;
+  while ((match = memRegex.exec(rawReplyText)) !== null) {
+    const summary = match[1]?.trim();
+    const rawTags = match[2] ? match[2].split(',').map((t) => t.trim()) : [];
+    const weight = match[3] ? parseInt(match[3], 10) : 3;
+    if (summary) {
+      upsertBotMemoryShard(bank, summary, rawTags, weight, contextId);
+      memoryModified = true;
+    }
+  }
+  cleaned = cleaned.replace(memRegex, '').trim();
+
+  // 2. Parse optional [USER_TRAIT: ...] or [USER_NAME: ...] markers
+  const traitRegex = /\[USER_TRAIT:\s*([^\]]+)\]/gi;
+  while ((match = traitRegex.exec(rawReplyText)) !== null) {
+    const trait = match[1]?.trim().slice(0, 45);
+    if (trait && !bank.u.traits.some((t) => t.toLowerCase() === trait.toLowerCase())) {
+      bank.u.traits = [trait, ...bank.u.traits].slice(0, 5);
+      bank.u.updatedAt = Math.floor(Date.now() / 1000);
+      memoryModified = true;
+    }
+  }
+  cleaned = cleaned.replace(traitRegex, '').trim();
+
+  const nameRegex = /\[USER_NAME:\s*([^\]]+)\]/gi;
+  while ((match = nameRegex.exec(rawReplyText)) !== null) {
+    const uName = match[1]?.trim().slice(0, 30);
+    if (uName) {
+      bank.u.name = uName;
+      bank.u.updatedAt = Math.floor(Date.now() / 1000);
+      memoryModified = true;
+    }
+  }
+  cleaned = cleaned.replace(nameRegex, '').trim();
+
+  // 3. Deterministic zero-cost heuristic capture from human message (ensures even small free models remember core user facts)
+  if (lastHumanMsg && lastHumanMsg.text) {
+    const hText = lastHumanMsg.text.trim();
+    const nameIntro = hText.match(/\b(?:my name is|call me|i'm|i am)\s+([A-Z][a-zA-Z0-9_-]{1,20})\b/);
+    if (
+      nameIntro &&
+      nameIntro[1] &&
+      !['Ready', 'Here', 'Building', 'Working', 'Trying', 'Looking', 'Thinking', 'Going', 'Sure', 'Not'].includes(
+        nameIntro[1]
+      )
+    ) {
+      if (bank.u.name !== nameIntro[1]) {
+        bank.u.name = nameIntro[1];
+        bank.u.updatedAt = Math.floor(Date.now() / 1000);
+        memoryModified = true;
+      }
+    }
+
+    const prefMatch = hText.match(
+      /\b(?:i prefer|i always use|i'm building|i am building|my project is|i work with|remember that)\s+([^.!?\n]{5,95})/i
+    );
+    if (prefMatch && prefMatch[1]) {
+      const fact = `User mentioned: ${prefMatch[0].trim().slice(0, 105)}`;
+      upsertBotMemoryShard(bank, fact, tokenizeForMemory(fact).slice(0, 4), 4, contextId);
+      memoryModified = true;
+    }
+  }
+
+  if (memoryModified) {
+    bank.u.updatedAt = Math.floor(Date.now() / 1000);
+  }
+
+  return cleaned;
 }
 
 const DATA_DIR = path.resolve(__dirname, 'data');
@@ -508,11 +836,15 @@ function getDeviceStore(req: express.Request): DeviceStore {
         totalImagesGenerated: 0,
         history: [],
       },
+      botMemories: {},
     };
     deviceStores.set(devId, store);
     persistDeviceStores();
   }
   const store = deviceStores.get(devId)!;
+  if (!store.botMemories) {
+    store.botMemories = {};
+  }
   if (!store.imageQuota) {
     store.imageQuota = {
       hourlyCredits: 10,
@@ -3118,7 +3450,119 @@ app.delete('/api/personas/:id', (req, res) => {
   }
 
   store.personas.splice(pIndex, 1);
+  persistDeviceStores();
   res.json({ success: true, personas: store.personas });
+});
+
+// Per-Bot Coherent Memory Bank Endpoints (Inspect, Edit/Pin, Reset)
+app.get('/api/personas/:id/memory', (req, res) => {
+  const store = getDeviceStore(req);
+  const { id } = req.params;
+  const persona = store.personas.find((p) => p.id === id || p.name.toLowerCase() === id.toLowerCase());
+  if (!persona) {
+    return res.status(404).json({ error: 'Persona not found' });
+  }
+  const bank = ensureBotMemoryBank(store, persona);
+  const currentCtx = store.contexts.find((c) => c.context_id === store.currentContextId);
+  const activeMessages = store.messages.filter((m) => m.context_id === store.currentContextId);
+  const lastHumanMsg = [...activeMessages]
+    .reverse()
+    .find(
+      (m) =>
+        m.speaker !== 'System' &&
+        !store.personas.some((p) => p.name.toLowerCase() === m.speaker.toLowerCase())
+    );
+  const preview = retrieveBotMemoryBlock(
+    store,
+    persona,
+    store.personas,
+    activeMessages.slice(-6),
+    lastHumanMsg,
+    currentCtx
+  );
+  const byteSize = Buffer.byteLength(JSON.stringify(bank), 'utf8');
+
+  res.json({
+    memory: bank,
+    microYamlPreview: preview.microYamlBlock,
+    approxPromptTokens: preview.approxTokens,
+    maxPromptTokens: 150,
+    shardCount: bank.e.length,
+    maxShards: 40,
+    byteSize,
+    maxBytes: 4096,
+  });
+});
+
+app.put('/api/personas/:id/memory', (req, res) => {
+  const store = getDeviceStore(req);
+  const { id } = req.params;
+  const persona = store.personas.find((p) => p.id === id || p.name.toLowerCase() === id.toLowerCase());
+  if (!persona) {
+    return res.status(404).json({ error: 'Persona not found' });
+  }
+  const bank = ensureBotMemoryBank(store, persona);
+  const { userName, rapport, traits, addShard, deleteShardId } = req.body;
+
+  if (userName !== undefined) {
+    bank.u.name = String(userName).trim().slice(0, 30) || undefined;
+    bank.u.updatedAt = Math.floor(Date.now() / 1000);
+  }
+  if (rapport !== undefined) {
+    bank.u.rapport = String(rapport).trim().slice(0, 95);
+    bank.u.updatedAt = Math.floor(Date.now() / 1000);
+  }
+  if (Array.isArray(traits)) {
+    bank.u.traits = traits
+      .map((t) => String(t).trim().slice(0, 45))
+      .filter(Boolean)
+      .slice(0, 5);
+    bank.u.updatedAt = Math.floor(Date.now() / 1000);
+  }
+  if (addShard && typeof addShard.s === 'string' && addShard.s.trim()) {
+    const tags = Array.isArray(addShard.k)
+      ? addShard.k.map((k: any) => String(k).trim())
+      : tokenizeForMemory(addShard.s);
+    upsertBotMemoryShard(bank, addShard.s, tags, Number(addShard.w) || 4, store.currentContextId);
+  }
+  if (typeof deleteShardId === 'string' && deleteShardId.trim()) {
+    bank.e = bank.e.filter((s) => s.id !== deleteShardId.trim());
+  }
+
+  persistDeviceStores();
+  const preview = retrieveBotMemoryBlock(store, persona, store.personas, []);
+  const byteSize = Buffer.byteLength(JSON.stringify(bank), 'utf8');
+
+  res.json({
+    success: true,
+    memory: bank,
+    microYamlPreview: preview.microYamlBlock,
+    approxPromptTokens: preview.approxTokens,
+    shardCount: bank.e.length,
+    byteSize,
+  });
+});
+
+app.delete('/api/personas/:id/memory', (req, res) => {
+  const store = getDeviceStore(req);
+  const { id } = req.params;
+  const persona = store.personas.find((p) => p.id === id || p.name.toLowerCase() === id.toLowerCase());
+  if (!persona) {
+    return res.status(404).json({ error: 'Persona not found' });
+  }
+  delete store.botMemories[persona.id];
+  const freshBank = ensureBotMemoryBank(store, persona);
+  persistDeviceStores();
+  const preview = retrieveBotMemoryBlock(store, persona, store.personas, []);
+
+  res.json({
+    success: true,
+    memory: freshBank,
+    microYamlPreview: preview.microYamlBlock,
+    approxPromptTokens: preview.approxTokens,
+    shardCount: freshBank.e.length,
+    byteSize: Buffer.byteLength(JSON.stringify(freshBank), 'utf8'),
+  });
 });
 
 app.post('/api/settings/model', (req, res) => {
@@ -3644,10 +4088,22 @@ app.post('/api/chat/turn', async (req, res) => {
     ? `- CONVERSATIONAL RELEVANCE: Directly respond to what the user (${lastHumanMsg.speaker}) said to you: "${lastHumanMsg.text}". Speak directly to them as ${persona.name}, and do not talk to yourself.`
     : `- CONVERSATIONAL RELEVANCE: Directly respond to what ${lastMsg ? `${lastMsg.speaker} said: "${lastMsg.text}"` : 'the conversation is discussing'}. Stay on topic, speak authentically as ${persona.name}, and contribute distinct value.`;
 
+  // Retrieve selective Top-3 Coherent Memory Block in Micro-YAML format (strictly capped <= 150 tokens)
+  const { microYamlBlock: botMemoryBlock } = retrieveBotMemoryBlock(
+    store,
+    persona,
+    activePool,
+    recentMessagesInContext,
+    lastHumanMsg,
+    currentCtx
+  );
+
   const promptContents = `${promptHistory}
 ---
 You are ${persona.name}.
 ${persona.description}
+
+${botMemoryBlock}
 
 Rules:
 ${negativeRulesList}
@@ -3655,6 +4111,7 @@ ${negativeRulesList}
 ${chatStructureRules}
 - SINGLE TURN ONLY: Write ONLY ${persona.name}'s single response for this turn. NEVER write dialogue lines for "You:", "User:", "Human:", or any other character, and NEVER continue a multi-turn conversation with yourself in one message.
 - Never prefix your output with your own name.${nsfwInstruction}${pollInstruction}${directiveInstruction}${tagInstruction}${pixelTaskInstruction}
+- COHERENT MEMORY RECORDING: Use your [Memory (${persona.name})] naturally without robotic announcements. If the user shares a lasting personal fact, preference, name, or project goal worth remembering across future chats, silently append \`[MEM: concise fact under 15 words | tags: tag1, tag2 | w: 1-5]\` at the very end of your reply.
 - WEB SEARCH CAPABILITY: You have live internet search enabled! If any real-world facts, current events, dates, statistics, quotes, technical details, or claims are mentioned in the conversation or directive, output [SEARCH: exact query text] in your draft reply to search the live web for verified facts before giving your final reply.
 - SANDBOX CODE EXECUTION & DATA VISUALIZATION: You have live Python sandbox execution enabled with an automated self-healing refinement loop! If any calculations, data transformations, or visual charts/infographics are requested, output [EXEC: python_code_here] in your draft reply. For Plotly charts, write a standalone Python script and save the figure as 'output.html' using fig.write_html('output.html', include_plotlyjs='cdn'). Do NOT call fig.write_image() as static kaleido export is incompatible. For matplotlib/seaborn, save using plt.savefig('output.png', bbox_inches='tight', dpi=150). Output ONLY executable Python code inside [EXEC: ...]. If an error occurs, the self-healing loop will automatically feed terminal stderr back to you to fix and re-run.
 - 🎨 PARALLEL TEXT-TO-IMAGE GENERATION (NEW FEATURE): You, fellow personas, and the user can generate images and artwork in real-time using Cloudflare Flux 1 Schnell (@cf/black-forest-labs/flux-1-schnell)! If you want to paint, illustrate, visualize a scene, or respond to visual ideas, include \`/image <detailed prompt describing the image>\` in your reply (e.g. \`/image an atmospheric cyberpunk neon owl perched on glowing rain-slicked circuitry, synthwave aesthetic, 8k\`). The system will automatically render your visual art right into the chat stream!
@@ -3852,6 +4309,15 @@ INSTRUCTION:
       .replace(/\[CRAWL:\s*[^\]]+\]/gi, '')
       .replace(/\[EXEC:\s*[\s\S]+?\]/gi, '')
       .trim();
+
+    // Extract and persist any inline [MEM: ...] or user traits before stripping markers from visible chat
+    replyText = extractAndSaveBotMemory(
+      store,
+      persona,
+      replyText,
+      lastHumanMsg,
+      store.currentContextId
+    );
 
     // Strip any hallucinated multi-turn continuation lines where the LLM scripts "You:" / "User:" / "Human:" or another speaker turn
     const allSpeakerLabels = [

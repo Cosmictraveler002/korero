@@ -110,6 +110,29 @@ export interface Persona {
   pacingDelaySeconds?: number; // 0 to 4s extra thoughtful pause
 }
 
+export interface BotMemoryUserCore {
+  name?: string;
+  traits: string[]; // Max 5 concise user traits
+  rapport: string; // 1-line relationship stance from this bot's perspective
+  updatedAt: number; // Unix seconds
+}
+
+export interface BotMemoryShard {
+  id: string;
+  s: string; // Concise 1-sentence fact/event summary (<= 120 chars)
+  k: string[]; // 3-6 lowercase keyword tags for zero-embedding retrieval
+  c: string; // Source context_id
+  w: number; // Salience weight (1-5)
+  t: number; // Unix timestamp (seconds)
+}
+
+export interface BotMemoryBank {
+  botId: string;
+  u: BotMemoryUserCore;
+  e: BotMemoryShard[]; // Max 40 shards in storage; only Top 3 injected per turn
+  p: Record<string, string>; // Peer bot stances (omitted in 1-on-1 chat)
+}
+
 export interface PixelTask {
   task_id: string;
   context_id: string;

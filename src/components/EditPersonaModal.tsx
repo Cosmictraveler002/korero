@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Check, Brain } from 'lucide-react';
-import { Persona, ThoughtfulnessLevel, ModelOption } from '../types';
+import { X, Check, Brain, Database, Trash2, Plus, Sparkles, Eye } from 'lucide-react';
+import { Persona, ThoughtfulnessLevel, ModelOption, BotMemoryBank } from '../types';
 import { PersonaAvatar } from './PersonaAvatar';
 
 interface EditPersonaModalProps {
@@ -37,6 +37,17 @@ const PRESET_COLORS = [
   '#71717a',
 ];
 
+function getDeviceHeaders(): Record<string, string> {
+  let devId = 'dev-local';
+  try {
+    devId = localStorage.getItem('korero_device_id') || 'dev-local';
+  } catch (e) {}
+  return {
+    'Content-Type': 'application/json',
+    'x-device-id': devId,
+  };
+}
+
 export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
   isOpen,
   onClose,
@@ -60,11 +71,50 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
   const [styleAnchors, setStyleAnchors] = useState<string[]>([]);
   const [newStyleAnchor, setNewStyleAnchor] = useState('');
 
+  // Per-Bot Coherent Memory Bank state
+  const [memoryBank, setMemoryBank] = useState<BotMemoryBank | null>(null);
+  const [microYamlPreview, setMicroYamlPreview] = useState<string>('');
+  const [approxPromptTokens, setApproxPromptTokens] = useState<number>(0);
+  const [byteSize, setByteSize] = useState<number>(0);
+  const [showYamlPreview, setShowYamlPreview] = useState<boolean>(false);
+  const [memUserName, setMemUserName] = useState<string>('');
+  const [memRapport, setMemRapport] = useState<string>('');
+  const [memTraits, setMemTraits] = useState<string[]>([]);
+  const [newTraitInput, setNewTraitInput] = useState<string>('');
+  const [newShardText, setNewShardText] = useState<string>('');
+  const [newShardTags, setNewShardTags] = useState<string>('');
+  const [newShardWeight, setNewShardWeight] = useState<number>(4);
+  const [isMemoryLoading, setIsMemoryLoading] = useState<boolean>(false);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const fetchBotMemory = async (personaId: string) => {
+    try {
+      setIsMemoryLoading(true);
+      const res = await fetch(`/api/personas/${encodeURIComponent(personaId)}/memory`, {
+        headers: getDeviceHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.memory) {
+        setMemoryBank(data.memory);
+        setMemUserName(data.memory.u?.name || '');
+        setMemRapport(data.memory.u?.rapport || '');
+        setMemTraits(Array.isArray(data.memory.u?.traits) ? data.memory.u.traits : []);
+        setMicroYamlPreview(data.microYamlPreview || '');
+        setApproxPromptTokens(data.approxPromptTokens || 0);
+        setByteSize(data.byteSize || 0);
+      }
+    } catch (e) {
+      // ignore fetch error
+    } finally {
+      setIsMemoryLoading(false);
+    }
+  };
+
   useEffect(() => {
-    if (persona) {
+    if (persona && isOpen) {
       setName(persona.name);
       setDescription(persona.description || '');
       setAvatarUrl(persona.avatarUrl || '');
@@ -77,10 +127,117 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
       setPacingDelaySeconds(persona.pacingDelaySeconds ?? (persona.thoughtfulness === 'scholarly' ? 3.0 : persona.thoughtfulness === 'thoughtful' ? 2.2 : persona.thoughtfulness === 'quick' ? 0 : 1.0));
       setConstraints(persona.negative_constraints || []);
       setStyleAnchors(persona.style_anchor || []);
+      fetchBotMemory(persona.id);
     }
-  }, [persona]);
+  }, [persona, isOpen]);
 
   if (!isOpen || !persona) return null;
+
+  const handleSaveCoreMemory = async (
+    nextName = memUserName,
+    nextRapport = memRapport,
+    nextTraits = memTraits
+  ) => {
+    try {
+      const res = await fetch(`/api/personas/${encodeURIComponent(persona.id)}/memory`, {
+        method: 'PUT',
+        headers: getDeviceHeaders(),
+        body: JSON.stringify({
+          userName: nextName,
+          rapport: nextRapport,
+          traits: nextTraits,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryBank(data.memory);
+        setMicroYamlPreview(data.microYamlPreview || '');
+        setApproxPromptTokens(data.approxPromptTokens || 0);
+        setByteSize(data.byteSize || 0);
+      }
+    } catch (e) {}
+  };
+
+  const handleAddMemoryTrait = () => {
+    const clean = newTraitInput.trim().slice(0, 45);
+    if (!clean || memTraits.length >= 5) return;
+    const updated = [...memTraits, clean].slice(0, 5);
+    setMemTraits(updated);
+    setNewTraitInput('');
+    handleSaveCoreMemory(memUserName, memRapport, updated);
+  };
+
+  const handleRemoveMemoryTrait = (idx: number) => {
+    const updated = memTraits.filter((_, i) => i !== idx);
+    setMemTraits(updated);
+    handleSaveCoreMemory(memUserName, memRapport, updated);
+  };
+
+  const handleAddMemoryShard = async () => {
+    if (!newShardText.trim()) return;
+    const tags = newShardTags
+      .split(',')
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+    try {
+      const res = await fetch(`/api/personas/${encodeURIComponent(persona.id)}/memory`, {
+        method: 'PUT',
+        headers: getDeviceHeaders(),
+        body: JSON.stringify({
+          addShard: {
+            s: newShardText.trim().slice(0, 120),
+            k: tags,
+            w: newShardWeight,
+          },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryBank(data.memory);
+        setMicroYamlPreview(data.microYamlPreview || '');
+        setApproxPromptTokens(data.approxPromptTokens || 0);
+        setByteSize(data.byteSize || 0);
+        setNewShardText('');
+        setNewShardTags('');
+      }
+    } catch (e) {}
+  };
+
+  const handleDeleteMemoryShard = async (shardId: string) => {
+    try {
+      const res = await fetch(`/api/personas/${encodeURIComponent(persona.id)}/memory`, {
+        method: 'PUT',
+        headers: getDeviceHeaders(),
+        body: JSON.stringify({ deleteShardId: shardId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryBank(data.memory);
+        setMicroYamlPreview(data.microYamlPreview || '');
+        setApproxPromptTokens(data.approxPromptTokens || 0);
+        setByteSize(data.byteSize || 0);
+      }
+    } catch (e) {}
+  };
+
+  const handleResetBotMemory = async () => {
+    try {
+      const res = await fetch(`/api/personas/${encodeURIComponent(persona.id)}/memory`, {
+        method: 'DELETE',
+        headers: getDeviceHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryBank(data.memory);
+        setMemUserName(data.memory.u?.name || '');
+        setMemRapport(data.memory.u?.rapport || '');
+        setMemTraits(data.memory.u?.traits || []);
+        setMicroYamlPreview(data.microYamlPreview || '');
+        setApproxPromptTokens(data.approxPromptTokens || 0);
+        setByteSize(data.byteSize || 0);
+      }
+    } catch (e) {}
+  };
 
   const handleAddConstraint = () => {
     if (newConstraint.trim()) {
@@ -114,6 +271,7 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
     try {
       setIsSubmitting(true);
       setError(null);
+      await handleSaveCoreMemory(memUserName, memRapport, memTraits);
       await onSave(persona.id, {
         name: name.trim(),
         description: description.trim(),
@@ -136,6 +294,7 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
   };
 
   const currentPreviewUrl = customUrlInput.trim() || avatarUrl;
+  const shardCount = memoryBank?.e?.length || 0;
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150">
@@ -148,7 +307,7 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
           <div>
             <h2 className="text-sm font-semibold text-white">Edit Bot: {persona.name}</h2>
             <p className="text-[11px] text-neutral-400 mt-0.5">
-              Change name, avatar image, personality, and behavioral constraints.
+              Change name, avatar, personality, and coherent per-bot memory bank.
             </p>
           </div>
           <button
@@ -217,6 +376,225 @@ export const EditPersonaModal: React.FC<EditPersonaModalProps> = ({
                       {badgeColor === c && <Check size={10} className="text-white" />}
                     </button>
                   ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Coherent Per-Bot Memory Bank (Minified JSON + Micro-YAML <= 150 tokens) */}
+          <div className="p-3 rounded border border-emerald-900/60 bg-neutral-950 space-y-2.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <Database size={14} className="text-emerald-400" />
+                <span className="font-semibold text-xs text-white">
+                  Coherent Bot Memory Bank
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/70 text-emerald-300">
+                  {shardCount}/40 shards
+                </span>
+                <span
+                  className="px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/70 text-cyan-300"
+                  title="Only Top-3 relevant shards are injected per turn as Micro-YAML (capped <= 150 tokens)"
+                >
+                  ~{approxPromptTokens}/150 tok prompt
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-400">
+                  {(byteSize / 1024).toFixed(1)}/4.0 KB
+                </span>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-neutral-400 leading-snug">
+              Stored as Minified JSON on disk and injected as compact Micro-YAML. Full memory is never pushed into chat—only User Core + Top 3 matched shards (≤ 150 tokens).
+            </p>
+
+            {/* User Core (u): Name, Rapport, and 5 Traits */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <div>
+                <label className="block text-[10px] font-medium text-neutral-400 mb-1">
+                  User Name Known By {name || persona.name}
+                </label>
+                <input
+                  type="text"
+                  value={memUserName}
+                  onChange={(e) => setMemUserName(e.target.value)}
+                  onBlur={() => handleSaveCoreMemory(memUserName, memRapport, memTraits)}
+                  placeholder="e.g. Subhamoy"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-emerald-700"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-medium text-neutral-400 mb-1">
+                  Relationship / Rapport Stance
+                </label>
+                <input
+                  type="text"
+                  value={memRapport}
+                  onChange={(e) => setMemRapport(e.target.value)}
+                  onBlur={() => handleSaveCoreMemory(memUserName, memRapport, memTraits)}
+                  placeholder="How this bot views its dynamic with you"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-emerald-700"
+                />
+              </div>
+            </div>
+
+            {/* User Core Traits (max 5) */}
+            <div>
+              <label className="block text-[10px] font-medium text-neutral-400 mb-1">
+                Core User Traits ({memTraits.length}/5 max)
+              </label>
+              <div className="flex flex-wrap gap-1 mb-1.5">
+                {memTraits.length === 0 ? (
+                  <span className="text-[10px] text-neutral-500 italic">
+                    No core user traits pinned yet.
+                  </span>
+                ) : (
+                  memTraits.map((t, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-[11px] text-neutral-200"
+                    >
+                      {t}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveMemoryTrait(idx)}
+                        className="text-neutral-500 hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+              {memTraits.length < 5 && (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={newTraitInput}
+                    onChange={(e) => setNewTraitInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddMemoryTrait())}
+                    placeholder="Add core trait (e.g. builds AI apps, prefers direct answers)"
+                    className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-emerald-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddMemoryTrait}
+                    className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-[11px]"
+                  >
+                    + Trait
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Episodic Memory Shards (e) */}
+            <div className="pt-1 border-t border-neutral-800/80">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] font-medium text-neutral-300">
+                  Episodic Memory Shards (Auto-captured via [MEM: ...] & keyword-scored)
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowYamlPreview(!showYamlPreview)}
+                    className="inline-flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
+                  >
+                    <Eye size={11} />
+                    {showYamlPreview ? 'Hide Prompt YAML' : 'Inspect Prompt YAML'}
+                  </button>
+                  {shardCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleResetBotMemory}
+                      className="inline-flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300 cursor-pointer"
+                    >
+                      <Trash2 size={11} />
+                      Reset
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {showYamlPreview && (
+                <div className="mb-2 p-2 rounded bg-black/70 border border-cyan-900/60 font-mono text-[10px] text-cyan-200 whitespace-pre-wrap leading-relaxed">
+                  {microYamlPreview || '[Memory]: Empty'}
+                </div>
+              )}
+
+              <div className="space-y-1 max-h-32 overflow-y-auto pr-1 mb-2">
+                {isMemoryLoading ? (
+                  <div className="text-[11px] text-neutral-500 py-1">Loading bot memory...</div>
+                ) : shardCount === 0 ? (
+                  <div className="text-[11px] text-neutral-500 italic py-1">
+                    No episodic memories recorded yet. Chat with {name || persona.name} or pin a memory below!
+                  </div>
+                ) : (
+                  memoryBank?.e.map((shard) => (
+                    <div
+                      key={shard.id}
+                      className="flex items-start justify-between gap-2 p-1.5 rounded bg-neutral-900/90 border border-neutral-800 text-[11px]"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-neutral-200 break-words leading-snug">{shard.s}</div>
+                        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                          <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-emerald-950 text-emerald-300 border border-emerald-800/60">
+                            w:{shard.w}
+                          </span>
+                          {shard.k?.map((tag, i) => (
+                            <span
+                              key={i}
+                              className="text-[9px] font-mono px-1 rounded bg-neutral-950 text-neutral-400 border border-neutral-800"
+                            >
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteMemoryShard(shard.id)}
+                        className="text-neutral-500 hover:text-red-400 p-0.5 shrink-0"
+                        title="Delete shard"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Add Manual Memory Shard */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5">
+                <input
+                  type="text"
+                  value={newShardText}
+                  onChange={(e) => setNewShardText(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddMemoryShard())}
+                  placeholder="Pin a memory fact (≤ 120 chars)..."
+                  className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-emerald-700"
+                />
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={newShardWeight}
+                    onChange={(e) => setNewShardWeight(Number(e.target.value))}
+                    className="bg-neutral-900 border border-neutral-800 rounded px-1.5 py-1 text-[11px] text-neutral-300"
+                    title="Salience Weight (1-5)"
+                  >
+                    <option value={5}>w:5 (Core)</option>
+                    <option value={4}>w:4 (High)</option>
+                    <option value={3}>w:3 (Med)</option>
+                    <option value={2}>w:2 (Low)</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleAddMemoryShard}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-xs font-medium shrink-0 cursor-pointer"
+                  >
+                    <Plus size={12} />
+                    Pin
+                  </button>
                 </div>
               </div>
             </div>
